@@ -1,0 +1,12 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode & User settings
+*.xcuserdata/
+xcuserdata/
+DerivedData/
+
+# OS Files
+.DS_Store
+Thumbs.db
