@@ -94,24 +94,6 @@ public final class ClipsAPIService {
         }
     }
 
-    /// Obtiene el catálogo de pistas musicales para Auto-Ducking
-    public func fetchMusicCatalog() async throws -> [MusicTrackItem] {
-        let endpoint = baseURL.appendingPathComponent("api/v1/assets/music")
-        let (data, response) = try await URLSession.shared.data(from: endpoint)
-
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            throw APIError.invalidResponse(statusCode: (response as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-
-        struct ResponseWrapper: Codable {
-            let status: String
-            let data: [MusicTrackItem]
-        }
-
-        let wrapper = try JSONDecoder().decode(ResponseWrapper.self, from: data)
-        return wrapper.data
-    }
-
     /// Obtiene la lista de presets de filtros / LUTs
     public func fetchLutPresets() async throws -> [LutPresetItem] {
         let endpoint = baseURL.appendingPathComponent("api/v1/assets/luts")
@@ -129,4 +111,88 @@ public final class ClipsAPIService {
         let wrapper = try JSONDecoder().decode(ResponseWrapper.self, from: data)
         return wrapper.data
     }
+
+    // MARK: - Análisis visual de frames (Gemini vision)
+
+    private struct AnalyzeFramesRequest: Codable {
+        let videoId: String
+        let language: String?
+        let frames: [FrameInput]
+    }
+
+    /// Envía thumbnails JPEG al backend para clasificación visual (escena + zona).
+    /// El video nunca sale del teléfono: solo ~18 imágenes de 320px (~0.5MB).
+    public func analyzeFrames(videoId: String, language: String?, frames: [FrameInput]) async throws -> [FrameAnalysis] {
+        let endpoint = baseURL.appendingPathComponent("api/v1/clips/analyze-frames")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 120.0
+
+        let body = AnalyzeFramesRequest(videoId: videoId, language: language, frames: frames)
+        request.httpBody = try JSONEncoder().encode(body)
+        print("📡 [ClipsAPI] Enviando \(frames.count) frames a \(endpoint)...")
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw APIError.networkFailure(error.localizedDescription)
+        }
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw APIError.invalidResponse(statusCode: code)
+        }
+        do {
+            let decoded = try JSONDecoder().decode(FramesResponse.self, from: data)
+            print("✅ [ClipsAPI] \(decoded.frames.count) frames clasificados.")
+            return decoded.frames
+        } catch {
+            throw APIError.decodingError(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Ingesta de Enlaces de YouTube
+    public func ingestYouTubeVideo(urlString: String) async throws -> YouTubeIngestResponse {
+        let endpoint = baseURL.appendingPathComponent("api/v1/ingest/youtube")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 180.0
+
+        let bodyDict = ["url": urlString]
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+
+        print("📡 [ClipsAPI] Ingestando video de YouTube: \(urlString)...")
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw APIError.networkFailure(error.localizedDescription)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse(statusCode: 0)
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let errorMsg = String(data: data, encoding: .utf8) ?? "Error \(httpResponse.statusCode)"
+            throw APIError.networkFailure(errorMsg)
+        }
+
+        let decoder = JSONDecoder()
+        return try decoder.decode(YouTubeIngestResponse.self, from: data)
+    }
+}
+
+public struct YouTubeIngestResponse: Codable {
+    public let videoId: String
+    public let title: String
+    public let thumbnailUrl: String
+    public let streamUrl: String?
+    public let words: [WordTimestamp]
+    public let analysis: EDLResponse
 }

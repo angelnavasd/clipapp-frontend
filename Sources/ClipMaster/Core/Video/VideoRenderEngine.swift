@@ -34,11 +34,15 @@ public struct RenderConfiguration {
     public var framingMode: FramingMode
     public var subtitleStyle: SubtitleStyle
     public var words: [WordTimestamp]
-    public var musicTrackURL: URL?
-    public var enableAutoDucking: Bool
     public var subtitleVerticalPosition: CGFloat
     public var speakerCenterX: CGFloat
     public var speakerCenterY: CGFloat
+    /// Ancho normalizado del rostro (0...1) para zoom adaptativo. nil = sin zoom.
+    public var speakerFaceWidth: CGFloat?
+    /// F5: encuadre por tramo en tiempo-source. Si se provee y el modo es autoFaceTrack,
+    /// cada segmento de la composición usa su propio centro (corte duro en los jump cuts,
+    /// que es lo natural). Si es nil se usa el centro único legacy.
+    public var perBeatCenters: [(start: Double, end: Double, x: CGFloat, y: CGFloat, faceWidth: CGFloat?)]?
     public var outputSize: CGSize
 
     public init(
@@ -46,22 +50,22 @@ public struct RenderConfiguration {
         framingMode: FramingMode = .autoFaceTrack,
         subtitleStyle: SubtitleStyle = .hormozi,
         words: [WordTimestamp],
-        musicTrackURL: URL? = nil,
-        enableAutoDucking: Bool = true,
         subtitleVerticalPosition: CGFloat = 0.65,
         speakerCenterX: CGFloat = 0.5,
         speakerCenterY: CGFloat = 0.5,
+        speakerFaceWidth: CGFloat? = nil,
+        perBeatCenters: [(start: Double, end: Double, x: CGFloat, y: CGFloat, faceWidth: CGFloat?)]? = nil,
         outputSize: CGSize = CGSize(width: 1080, height: 1920)
     ) {
         self.clip = clip
         self.framingMode = framingMode
         self.subtitleStyle = subtitleStyle
         self.words = words
-        self.musicTrackURL = musicTrackURL
-        self.enableAutoDucking = enableAutoDucking
         self.subtitleVerticalPosition = subtitleVerticalPosition
         self.speakerCenterX = speakerCenterX
         self.speakerCenterY = speakerCenterY
+        self.speakerFaceWidth = speakerFaceWidth
+        self.perBeatCenters = perBeatCenters
         self.outputSize = outputSize
     }
 }
@@ -127,6 +131,14 @@ public final class VideoRenderEngine {
             preferredTrackID: kCMPersistentTrackID_Invalid
         )
 
+        var compVideoTrack2: AVMutableCompositionTrack? = nil
+        if config.framingMode == .splitScreen {
+            compVideoTrack2 = composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+        }
+
         guard let sourceVideoTrack = try await sourceAsset.loadTracks(withMediaType: .video).first else {
             throw RenderError.noVideoTrack
         }
@@ -135,31 +147,36 @@ public final class VideoRenderEngine {
 
         // 2. Concatenar los segmentos válidos (storyBeats o keepSegments)
         let keepSegments = calculateKeepSegments(for: config.clip)
+        let sourceDuration = (try? await sourceAsset.load(.duration).seconds) ?? .infinity
+        // Segmentos clampeados al EOF real (misma lista para inserción y transforms)
+        let clampedSegments: [(start: Double, end: Double)] = keepSegments.compactMap { seg in
+            let s = max(0, min(seg.start, sourceDuration))
+            let e = max(0, min(seg.end, sourceDuration))
+            guard e - s > 0.05 else {
+                print("⚠️ [Render] segmento fuera de rango, saltado: \(seg.start)-\(seg.end)")
+                return nil
+            }
+            return (s, e)
+        }
 
         var insertionTime = CMTime.zero
-        var speechIntervals: [DuckingSpeechInterval] = []
-
-        for segment in keepSegments {
+        for segment in clampedSegments {
             let segDuration = segment.end - segment.start
-            guard segDuration > 0.05 else { continue }
 
             let startTime = CMTime(seconds: segment.start, preferredTimescale: 600)
             let duration = CMTime(seconds: segDuration, preferredTimescale: 600)
             let timeRange = CMTimeRange(start: startTime, duration: duration)
 
-            // Insertar video
+            // Insertar video en pista principal y pista secundaria para split-screen
             try compVideoTrack.insertTimeRange(timeRange, of: sourceVideoTrack, at: insertionTime)
+            try compVideoTrack2?.insertTimeRange(timeRange, of: sourceVideoTrack, at: insertionTime)
 
             // Insertar audio original del hablante
             if let audioTrack = sourceAudioTrack {
                 try compAudioTrack?.insertTimeRange(timeRange, of: audioTrack, at: insertionTime)
             }
 
-            // Registrar intervalo de habla para Auto-Ducking
-            let segEndTime = CMTimeAdd(insertionTime, duration)
-            speechIntervals.append(DuckingSpeechInterval(start: insertionTime, end: segEndTime))
-
-            insertionTime = segEndTime
+            insertionTime = CMTimeAdd(insertionTime, duration)
         }
 
         let totalDuration = insertionTime
@@ -167,38 +184,7 @@ public final class VideoRenderEngine {
             throw RenderError.compositionFailed("La duración de la composición es cero")
         }
 
-        // 3. Pista de música secundaria y Auto-Ducking (si aplica)
-        var audioMix: AVAudioMix? = nil
-        if let musicURL = config.musicTrackURL, config.enableAutoDucking {
-            let musicAsset = AVURLAsset(url: musicURL)
-            if let musicAudioTrack = try? await musicAsset.loadTracks(withMediaType: .audio).first,
-               let compMusicTrack = composition.addMutableTrack(
-                   withMediaType: .audio,
-                   preferredTrackID: kCMPersistentTrackID_Invalid
-               ) {
-                // Rellenar la música en bucle si es necesario
-                var musicInsertionTime = CMTime.zero
-                let musicDuration = try await musicAsset.load(.duration)
-
-                while musicInsertionTime < totalDuration {
-                    let chunkDuration = min(musicDuration, CMTimeSubtract(totalDuration, musicInsertionTime))
-                    try compMusicTrack.insertTimeRange(
-                        CMTimeRange(start: .zero, duration: chunkDuration),
-                        of: musicAudioTrack,
-                        at: musicInsertionTime
-                    )
-                    musicInsertionTime = CMTimeAdd(musicInsertionTime, chunkDuration)
-                }
-
-                audioMix = AudioDuckingEngine.shared.createDuckingAudioMix(
-                    musicTrack: compMusicTrack,
-                    speechIntervals: speechIntervals,
-                    totalDuration: totalDuration
-                )
-            }
-        }
-
-        // 4. Configurar VideoComposition (Recorte 9:16 y Capa de Subtítulos)
+        // 3. Configurar VideoComposition (Recorte 9:16 y Capa de Subtítulos)
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = config.outputSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30) // 30 fps
@@ -206,19 +192,85 @@ public final class VideoRenderEngine {
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
 
-        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideoTrack)
         let sourceDimensions = try await sourceVideoTrack.load(.naturalSize)
 
-        // Calcular encuadre centrado o con face-tracking
-        let cropTransform = FaceTrackingService.shared.calculateCropTransform(
-            originalSize: sourceDimensions,
-            targetSize: config.outputSize,
-            centerX: config.speakerCenterX,
-            centerY: config.speakerCenterY,
-            mode: config.framingMode
-        )
-        layerInstruction.setTransform(cropTransform, at: .zero)
-        instruction.layerInstructions = [layerInstruction]
+        if config.framingMode == .splitScreen, let track2 = compVideoTrack2 {
+            let split = FaceCropCalculator.splitFraction
+            let topHeight = config.outputSize.height * split
+            let bottomHeight = config.outputSize.height - topHeight
+
+            // Track 1: pantalla ajustada al ancho, PEGADA ARRIBA (sin banda negra superior)
+            let topScale = config.outputSize.width / sourceDimensions.width
+
+            var topTransform = CGAffineTransform.identity
+            topTransform = topTransform.scaledBy(x: topScale, y: topScale)
+
+            let layerInstruction1 = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideoTrack)
+            layerInstruction1.setTransform(topTransform, at: .zero)
+
+            // Track 2: webcam con crop del MISMO aspect de su zona -> la llena exacta
+            let zoneAspect = config.outputSize.width / bottomHeight
+            let cropRect = FaceCropCalculator.splitBottomCropRect(
+                sourceSize: sourceDimensions,
+                center: CGPoint(x: config.speakerCenterX, y: config.speakerCenterY),
+                targetAspect: zoneAspect
+            )
+            let cropX = cropRect.origin.x
+            let cropY = cropRect.origin.y
+            let cropW = cropRect.width
+            let cropH = cropRect.height
+
+            let bottomScale = config.outputSize.width / cropW
+            var bottomTransform = CGAffineTransform.identity
+            bottomTransform = bottomTransform.translatedBy(x: 0, y: topHeight)
+            bottomTransform = bottomTransform.scaledBy(x: bottomScale, y: bottomScale)
+            bottomTransform = bottomTransform.translatedBy(x: -cropX, y: -cropY)
+
+            let layerInstruction2 = AVMutableVideoCompositionLayerInstruction(assetTrack: track2)
+            layerInstruction2.setTransform(bottomTransform, at: .zero)
+            layerInstruction2.setCropRectangle(
+                CGRect(x: cropX, y: cropY, width: cropW, height: cropH),
+                at: .zero
+            )
+
+            instruction.layerInstructions = [layerInstruction1, layerInstruction2]
+        } else {
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideoTrack)
+            // F4: misma matemática que el preview (FaceCropCalculator)
+            // F5: un transform por segmento de composición cuando hay centros por beat
+            if config.framingMode == .autoFaceTrack, let perBeat = config.perBeatCenters, !perBeat.isEmpty {
+                var compCursor = CMTime.zero
+                for segment in clampedSegments {
+                    let segDuration = segment.end - segment.start
+                    guard segDuration > 0.05 else { continue }
+                    let mid = (segment.start + segment.end) / 2.0
+                    let beat = perBeat.first(where: { mid >= $0.start && mid <= $0.end })
+                    let cx = beat?.x ?? config.speakerCenterX
+                    let cy = beat?.y ?? config.speakerCenterY
+                    let fw = beat?.faceWidth ?? config.speakerFaceWidth
+                    let t = FaceCropCalculator.exportTransform(
+                        sourceSize: sourceDimensions,
+                        targetSize: config.outputSize,
+                        center: CGPoint(x: cx, y: cy),
+                        faceWidth: fw,
+                        mode: config.framingMode
+                    )
+                    layerInstruction.setTransform(t, at: compCursor)
+                    compCursor = CMTimeAdd(compCursor, CMTime(seconds: segDuration, preferredTimescale: 600))
+                }
+            } else {
+                let cropTransform = FaceCropCalculator.exportTransform(
+                    sourceSize: sourceDimensions,
+                    targetSize: config.outputSize,
+                    center: CGPoint(x: config.speakerCenterX, y: config.speakerCenterY),
+                    faceWidth: config.speakerFaceWidth,
+                    mode: config.framingMode
+                )
+                layerInstruction.setTransform(cropTransform, at: .zero)
+            }
+            instruction.layerInstructions = [layerInstruction]
+        }
+
         videoComposition.instructions = [instruction]
 
         // 5. Capa de subtítulos dinámicos con CoreAnimation
@@ -227,7 +279,21 @@ public final class VideoRenderEngine {
 
         let parentLayer = CALayer()
         parentLayer.frame = CGRect(origin: .zero, size: config.outputSize)
+        parentLayer.isGeometryFlipped = true
+        videoLayer.isGeometryFlipped = true
         parentLayer.addSublayer(videoLayer)
+
+        if config.framingMode == .splitScreen {
+            let divider = CALayer()
+            divider.frame = CGRect(
+                x: 0,
+                y: config.outputSize.height * 0.55 - 2,
+                width: config.outputSize.width,
+                height: 4
+            )
+            divider.backgroundColor = CGColor(red: 0.1, green: 0.1, blue: 0.14, alpha: 0.95)
+            parentLayer.addSublayer(divider)
+        }
 
         let subtitleLayer = SubtitleOverlayGenerator.shared.createSubtitleLayer(
             words: config.words,
@@ -258,7 +324,6 @@ public final class VideoRenderEngine {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mp4
         exportSession.videoComposition = videoComposition
-        exportSession.audioMix = audioMix
         exportSession.shouldOptimizeForNetworkUse = true
 
         let progressTask = Task {

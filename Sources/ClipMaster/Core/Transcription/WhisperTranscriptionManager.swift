@@ -154,11 +154,16 @@ public final class WhisperTranscriptionManager {
             throw TranscriptionError.inferenceFailed("No se detectó voz ni palabras comprensibles en el audio del video.")
         }
 
+        // F1: adjuntar silencios vDSP para que el backend los salte (antes se calculaban y se tiraban)
+        let gaps = audioAnalyzer.detectSilenceGaps(in: energyWindows, minDurationSeconds: 0.5)
+        let silenceGaps = gaps.map { SilenceGap(start: $0.start, end: $0.end) }
+
         return TranscriptPayload(
             videoId: videoId,
             language: language,
             videoDuration: videoDuration,
-            words: rawWords
+            words: rawWords,
+            silenceGaps: silenceGaps
         )
     }
 }

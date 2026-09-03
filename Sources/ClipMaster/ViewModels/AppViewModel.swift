@@ -53,19 +53,38 @@ public final class AppViewModel: ObservableObject {
     @Published public var selectedClip: ClipDecision? = nil
     @Published public var activeEditorTab: Int = 0 // 0: Trim/Text, 1: Framing, 2: Subtitles, 3: Audio/Vibe
     @Published public var selectedFramingMode: FramingMode = .autoFaceTrack
+    @Published public var selectedWebcamCorner: WebcamCorner = .bottomRight
+    @Published public var playerReloadToken: UUID = UUID()
     @Published public var detectedSpeakerCenterX: CGFloat = 0.5
     @Published public var detectedSpeakerCenterY: CGFloat = 0.5
+    /// Ancho normalizado del rostro para zoom adaptativo (F4). nil = sin zoom.
+    @Published public var detectedSpeakerFaceWidth: CGFloat? = nil
+    /// Tracking facial por beat del clip seleccionado (F5: encuadre + export por tramo).
+    @Published public var beatFaceTracks: [BeatFaceTrack] = []
+    /// FIX-feed: framing resuelto POR CLIP. El feed mostraba todas las cards con el
+    /// framing global del clip 1; ahora cada clip tiene el suyo (modo + centros por beat).
+    @Published public var clipFramings: [String: ClipFraming] = [:]
+    /// Clips cuyo player murió en negro: la card cae al poster con el error logueado.
+    @Published public var failedClipIds: Set<String> = []
+
+    /// Marca un clip como fallido en reproducción (hilo main).
+    public func notePlaybackFailure(_ clipId: String) {
+        self.failedClipIds.insert(clipId)
+    }
     @Published public var isScreenShareDetected: Bool = false
     @Published public var selectedSubtitleStyle: SubtitleStyle = .hormozi
     @Published public var selectedSubtitleSize: SubtitleFontSize = .medium
     @Published public var showSafeZoneOverlay: Bool = true
     @Published public var subtitleVerticalOffset: CGFloat = 0.65
-    @Published public var enableAutoDucking: Bool = true
-    @Published public var selectedMusicTrack: MusicTrackItem? = nil
     @Published public var selectedLutPreset: LutPresetItem? = nil
 
+    // MARK: - Ingesta de YouTube
+    @Published public var youTubeURLInput: String = ""
+    @Published public var youTubeTitle: String? = nil
+    @Published public var youTubeThumbnailURL: String? = nil
+    @Published public var isProcessingYouTube: Bool = false
+
     // MARK: - Catálogos de Assets
-    @Published public var musicTracks: [MusicTrackItem] = []
     @Published public var lutPresets: [LutPresetItem] = []
 
     // MARK: - Estado de Exportación
@@ -77,9 +96,14 @@ public final class AppViewModel: ObservableObject {
     // MARK: - Servicios
     private let audioExtractionManager = AudioExtractionManager.shared
     private let transcriptionManager = WhisperTranscriptionManager.shared
-    private let faceTrackingService = FaceTrackingService.shared
+    private let frameExtractor = FrameExtractorService.shared
     private let apiService = ClipsAPIService.shared
     private let renderEngine = VideoRenderEngine.shared
+    // DEPRECATED: Vision on-device mataba al MediaAnalysisDaemon (XPC invalidated)
+    // con ráfagas de requests. Fuera del pipeline; framing por Gemini vision.
+    // Se conservan por si se necesitan como último recurso manual.
+    private let faceTrackingService = FaceTrackingService.shared
+    private let sceneLayoutEngine = SceneLayoutEngine.shared
 
     public init() {
         Task {
@@ -88,20 +112,17 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func loadInitialAssets() async {
-        do {
-            async let music = apiService.fetchMusicCatalog()
-            async let luts = apiService.fetchLutPresets()
-            self.musicTracks = (try? await music) ?? []
-            self.lutPresets = (try? await luts) ?? []
-            self.selectedMusicTrack = musicTracks.first
-            self.selectedLutPreset = lutPresets.first
-        }
+        let luts = (try? await apiService.fetchLutPresets()) ?? []
+        self.lutPresets = luts
+        self.selectedLutPreset = luts.first
     }
 
     // MARK: - Ingesta de Video
     public func processPickedVideo(url: URL) async {
         self.localVideoURL = url
         self.errorMessage = nil
+        self.failedClipIds = []
+        self.clipFramings = [:]
         let asset = AVURLAsset(url: url)
         if let dur = try? await asset.load(.duration).seconds {
             self.videoDuration = dur
@@ -140,7 +161,7 @@ public final class AppViewModel: ObservableObject {
             triggerHapticFeedback()
             self.currentProcessingStep = .transcribingOnDevice
             let videoId = "local-\(UUID().uuidString.prefix(8))"
-            let transcript = try await transcriptionManager.transcribe(
+            var transcript = try await transcriptionManager.transcribe(
                 audioSamples: audioSamples,
                 videoId: videoId,
                 language: selectedLanguage,
@@ -149,6 +170,8 @@ public final class AppViewModel: ObservableObject {
             ) { [weak self] p in
                 Task { @MainActor in self?.processingProgress = 0.25 + (p * 0.4) }
             }
+            // F1: adjuntar preferencia de duración del usuario (antes se ignoraba)
+            transcript.targetDuration = targetDuration
             self.transcriptPayload = transcript
             print("✅ [Step 2] Transcripción completada: \(transcript.words.count) palabras (videoDuration=\(String(format: "%.1f", totalDuration))s, offset=\(String(format: "%.1f", timeOffset))s)")
 
@@ -168,6 +191,14 @@ public final class AppViewModel: ObservableObject {
                 return
             }
 
+            // PASO 3.5: Framing visual con Gemini (thumbs, sin Vision on-device)
+            print("👁️ [Step 3.5] Analizando encuadre con Gemini vision...")
+            self.selectedFramingMode = .autoFaceTrack
+
+            if let firstClip = edl.clips.first {
+                await self.resolveFraming(for: firstClip, asset: asset)
+            }
+
             // PASO 4: Preparación de previsualizaciones
             print("🎬 [Step 4] Preparando previsualizaciones...")
             triggerHapticFeedback()
@@ -182,6 +213,15 @@ public final class AppViewModel: ObservableObject {
             }
             print("🎉 [Pipeline Completado] Navegando a Clips Feed con \(edl.clips.count) clips.")
             self.navigationState = .clipsFeed
+
+            // FIX-feed: resolver en fondo el framing de los demás clips para que
+            // cada card tenga su propio encuadre (sin bloquear la navegación).
+            let allClips = edl.clips
+            let firstId = allClips.first?.id
+            Task { [weak self] in
+                guard let self else { return }
+                await self.resolveRemainingClips(allClips, asset: asset, skipId: firstId)
+            }
         } catch {
             print("❌ [Pipeline Falló]: \(error.localizedDescription)")
             self.errorMessage = error.localizedDescription
@@ -189,10 +229,63 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Ingesta y Procesamiento de Enlace de YouTube
+    public func processYouTubeURL(urlString: String) async {
+        let cleanURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanURL.isEmpty else { return }
+
+        self.navigationState = .processing
+        self.isProcessingYouTube = true
+        self.currentProcessingStep = .analyzingWithGemini
+        self.processingProgress = 0.25
+        self.errorMessage = nil
+
+        do {
+            print("▶️ [YouTube Ingestion] Procesando: \(cleanURL)...")
+            triggerHapticFeedback(type: .light)
+            let result = try await apiService.ingestYouTubeVideo(urlString: cleanURL)
+
+            self.youTubeTitle = result.title
+            self.youTubeThumbnailURL = result.thumbnailUrl
+            self.edlResponse = result.analysis
+
+            // Si hay streamUrl directo, configurarlo como video local
+            if let streamStr = result.streamUrl, let streamURL = URL(string: streamStr) {
+                self.localVideoURL = streamURL
+            }
+
+            let dur = result.words.last?.end ?? 60.0
+            self.videoDuration = dur
+            self.transcriptPayload = TranscriptPayload(
+                videoId: result.videoId,
+                language: self.selectedLanguage,
+                videoDuration: dur,
+                words: result.words
+            )
+
+            if let firstClip = result.analysis.clips.first {
+                self.selectedClip = firstClip
+            }
+
+            self.processingProgress = 1.0
+            self.isProcessingYouTube = false
+            triggerHapticFeedback(type: .success)
+            self.navigationState = .clipsFeed
+        } catch {
+            print("❌ [YouTube Ingestion Error]: \(error.localizedDescription)")
+            self.isProcessingYouTube = false
+            self.errorMessage = error.localizedDescription
+            self.navigationState = .home
+            triggerHapticFeedback(type: .error)
+        }
+    }
+
     /// Construye una composición en memoria de AVFoundation para reproducir los saltos de tiempo (jump cuts) sin interrupciones
-    public func buildComposition(for clip: ClipDecision, sourceURL: URL) async throws -> AVMutableComposition {
+    public func buildComposition(
+        for clip: ClipDecision,
+        sourceURL: URL
+    ) async throws -> AVMutableComposition {
         print("🔧 [buildComposition] Iniciando para clip '\(clip.title)' desde \(sourceURL.lastPathComponent)")
-        print("🔧 [buildComposition] clip.storyBeats count = \(clip.storyBeats?.count ?? 0), clip.cutSegments count = \(clip.cutSegments.count)")
         
         let asset = AVURLAsset(url: sourceURL)
         let composition = AVMutableComposition()
@@ -214,43 +307,34 @@ public final class AppViewModel: ObservableObject {
             ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             : nil
 
-        // Transferir preferredTransform para evitar pantalla negra o rotación incorrecta
         let transform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
         compVideoTrack.preferredTransform = transform
 
         let sourceDuration = (try? await asset.load(.duration).seconds) ?? 0.0
-        print("🔧 [buildComposition] Duración del asset original: \(String(format: "%.1f", sourceDuration))s")
-        
         var insertTime = CMTime.zero
 
-        // Obtener segmentos: beats o keepSegments
         let segments: [(start: Double, end: Double)]
         if let beats = clip.storyBeats, !beats.isEmpty {
             segments = beats.map { ($0.start, $0.end) }
-            print("🔧 [buildComposition] Usando \(beats.count) storyBeats como segmentos")
         } else {
             segments = VideoRenderEngine.shared.calculateKeepSegments(for: clip)
-            print("🔧 [buildComposition] Usando \(segments.count) keepSegments (sin storyBeats)")
         }
 
-        // Si la lista de segmentos está vacía, usar el rango completo del clip como salvaguarda
         let finalSegments = segments.isEmpty
             ? [(clip.timeRange.start, clip.timeRange.end)]
             : segments
-        
-        print("🔧 [buildComposition] Total \(finalSegments.count) segmentos a insertar:")
-        for (i, seg) in finalSegments.enumerated() {
-            print("  📐 Segmento \(i+1): \(String(format: "%.1f", seg.0))s - \(String(format: "%.1f", seg.1))s (dur=\(String(format: "%.1f", seg.1 - seg.0))s)")
-        }
 
         for seg in finalSegments {
-            let safeStart = max(0, min(seg.0, sourceDuration))
-            let safeEnd = max(safeStart + 0.1, min(seg.1, sourceDuration))
-            let segDur = safeEnd - safeStart
-            guard segDur > 0.05 else {
-                print("⚠️ [buildComposition] Saltando segmento demasiado corto: \(segDur)s")
+            // FIX "reproduce y se queda negro": un beat más allá del EOF generaba
+            // un hueco vacío en la composición (negro eterno). Se salta, no se rellena.
+            let s = max(0, min(seg.0, sourceDuration))
+            let e = max(0, min(seg.1, sourceDuration))
+            guard e - s > 0.05 else {
+                print("⚠️ [buildComposition] segmento fuera de rango, saltado: \(String(format: "%.1f", seg.0))-\(String(format: "%.1f", seg.1)) (fuente: \(String(format: "%.1f", sourceDuration))s)")
                 continue
             }
+            let safeStart = s
+            let segDur = e - s
 
             let startCM = CMTime(seconds: safeStart, preferredTimescale: 600)
             let durCM = CMTime(seconds: segDur, preferredTimescale: 600)
@@ -263,18 +347,26 @@ public final class AppViewModel: ObservableObject {
                 }
                 insertTime = CMTimeAdd(insertTime, durCM)
             } catch {
-                print("❌ [buildComposition] Fallo al insertar rango (\(safeStart) - \(safeEnd)): \(error)")
+                print("❌ [buildComposition] Fallo al insertar rango (\(safeStart) - \(safeStart + segDur)): \(error)")
             }
         }
 
         let totalCompDuration = insertTime.seconds
-        print("✅ [buildComposition] Composición lista: \(String(format: "%.1f", totalCompDuration))s netos (vs \(String(format: "%.1f", sourceDuration))s original)")
-        
         guard totalCompDuration > 0.5 else {
             throw RenderError.compositionFailed("Composición vacía (<0.5s)")
         }
 
         return composition
+    }
+
+    public func setWebcamCorner(_ corner: WebcamCorner) {
+        self.selectedWebcamCorner = corner
+        let coords = corner.centerNormalized
+        self.detectedSpeakerCenterX = coords.x
+        self.detectedSpeakerCenterY = coords.y
+        self.detectedSpeakerFaceWidth = nil
+        self.playerReloadToken = UUID()
+        print("🎯 [Encuadre] Webcam fijada a \(corner.rawValue): (\(coords.x), \(coords.y))")
     }
 
     // MARK: - Acciones del Editor
@@ -311,8 +403,13 @@ public final class AppViewModel: ObservableObject {
         let outputFileName = "Export_\(clip.id)_\(Int(Date().timeIntervalSince1970)).mp4"
         let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(outputFileName)
 
-        let wordsForClip = (transcriptPayload?.words ?? []).filter {
-            $0.start >= clip.timeRange.start && $0.end <= clip.timeRange.end
+        let rawWords = (transcriptPayload?.words ?? []).filter {
+            $0.start >= (clip.timeRange.start - 1.0) && $0.end <= (clip.timeRange.end + 1.0)
+        }
+        let wordsForClip = mapWordsToCompositionTime(words: rawWords, for: clip)
+        print("🎬 [Export] Subtítulos mapeados a la composición: \(wordsForClip.count) palabras.")
+        if let first = wordsForClip.first, let last = wordsForClip.last {
+            print("🎬 [Export] Rango de subtítulos: \(String(format: "%.2f", first.start))s a \(String(format: "%.2f", last.end))s")
         }
 
         let config = RenderConfiguration(
@@ -320,11 +417,11 @@ public final class AppViewModel: ObservableObject {
             framingMode: selectedFramingMode,
             subtitleStyle: selectedSubtitleStyle,
             words: wordsForClip,
-            musicTrackURL: nil,
-            enableAutoDucking: enableAutoDucking,
             subtitleVerticalPosition: subtitleVerticalOffset,
             speakerCenterX: detectedSpeakerCenterX,
-            speakerCenterY: detectedSpeakerCenterY
+            speakerCenterY: detectedSpeakerCenterY,
+            speakerFaceWidth: detectedSpeakerFaceWidth,
+            perBeatCenters: perBeatCenters(for: clip)
         )
 
         do {
@@ -345,6 +442,112 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
+    /// Framing por Gemini vision (thumbnails, sin Vision on-device).
+    /// 2 thumbs por beat -> clasificación escena+zona -> ClipFraming en el store.
+    /// Nunca crashea: si falla red o extracción, guarda centros neutros.
+    /// Decide el modo de encuadre combinando `needsFace` del backend con lo que ve Gemini.
+    /// Guarda el resultado en `clipFramings[clip.id]`; si `updateGlobals`, además
+    /// actualiza el estado global del editor.
+    @discardableResult
+    public func resolveFraming(for clip: ClipDecision, asset: AVAsset, updateGlobals: Bool = true) async -> ClipFraming {
+        let beatRanges: [(start: Double, end: Double)]
+        let beatRoles: [String]
+        if let beats = clip.storyBeats, !beats.isEmpty {
+            beatRanges = beats.map { ($0.start, $0.end) }
+            beatRoles = beats.map(\.role)
+        } else {
+            beatRanges = [(clip.timeRange.start, clip.timeRange.end)]
+            beatRoles = ["story"]
+        }
+        if updateGlobals { self.beatFaceTracks = [] }
+
+        // 1. Thumbs (solo extracción AVFoundation: imposible matar al MAD)
+        var stamps: [(time: Double, beat: Int)] = []
+        for (i, r) in beatRanges.enumerated() {
+            for t in FrameExtractorService.thumbTimes(forBeat: r.start, end: r.end) {
+                stamps.append((t, i))
+            }
+        }
+        let thumbs = await frameExtractor.extractThumbs(in: asset, at: stamps.map(\.time))
+        var beatOfTime: [Double: Int] = [:]
+        for s in stamps { beatOfTime[s.time] = s.beat }
+
+        // Sin thumbs -> neutro (nunca se bloquea ni crashea)
+        guard !thumbs.isEmpty else {
+            print("⚠️ [Framing] sin thumbs -> centros neutros para \(clip.id)")
+            let framing = ClipFraming(mode: .autoFaceTrack, centerX: 0.5, centerY: 0.5,
+                beatCenters: beatRanges.map { BeatCenter(start: $0.start, end: $0.end, x: 0.5, y: 0.5) })
+            self.clipFramings[clip.id] = framing
+            if updateGlobals { self.applyFraming(framing) }
+            return framing
+        }
+
+        // 2. UNA llamada vision con todos los thumbs del clip (~18 imgs, ~0.5MB)
+        let videoId = transcriptPayload?.videoId ?? clip.id
+        var inputs: [FrameInput] = []
+        var idToBeat: [String: Int] = [:]
+        for th in thumbs {
+            guard let b = beatOfTime[th.timestamp] else { continue }
+            let id = "b\(b)t\(th.timestamp)"
+            idToBeat[id] = b
+            inputs.append(FrameInput(id: id, timestamp: th.timestamp, clipId: clip.id,
+                beatId: "beat_\(b)", role: beatRoles[b], imageBase64: th.base64))
+        }
+        let analyses = (try? await apiService.analyzeFrames(videoId: videoId, language: selectedLanguage, frames: inputs)) ?? []
+        var byBeat: [Int: [FrameAnalysis]] = [:]
+        for a in analyses {
+            if let b = idToBeat[a.id] { byBeat[b, default: []].append(a) }
+        }
+
+        // 3. Un thumb por beat -> BeatCenter; modo del clip SIEMPRE auto (cara).
+        // Sin split/blur automáticos: la pantalla se ignora por diseño, el crop
+        // 9:16 va a la cara con ventana adaptativa. Split/blur solo manuales.
+        var centers: [BeatCenter] = []
+        for (i, r) in beatRanges.enumerated() {
+            let list = byBeat[i] ?? []
+            centers.append(FrameFramingMapper.beatCenter(start: r.start, end: r.end, frames: list))
+        }
+        let mode: FramingMode = .autoFaceTrack
+        let mid = centers[centers.count / 2]
+        let center: (x: CGFloat, y: CGFloat) = (mid.x, mid.y)
+        let framing = ClipFraming(mode: mode, centerX: center.x, centerY: center.y, beatCenters: centers)
+        self.clipFramings[clip.id] = framing
+        if updateGlobals { self.applyFraming(framing) }
+        let kb = thumbs.reduce(0) { $0 + $1.jpegData.count } / 1024
+        print("🎯 [Framing:Gemini] clip=\(clip.id) modo=\(mode.rawValue) beats=\(centers.count) thumbs=\(thumbs.count) (\(kb)KB)")
+        return framing
+    }
+
+    /// Aplica un framing guardado al estado global del editor.
+    public func applyFraming(_ framing: ClipFraming) {
+        self.selectedFramingMode = framing.mode
+        self.detectedSpeakerCenterX = framing.centerX
+        self.detectedSpeakerCenterY = framing.centerY
+        self.detectedSpeakerFaceWidth = framing.faceWidth
+    }
+
+    /// FIX-feed: resuelve en fondo el framing de todos los clips del EDL para que
+    /// cada card tenga su propio encuadre (no el del clip 1). Corre tras navegar al feed.
+    public func resolveRemainingClips(_ clips: [ClipDecision], asset: AVAsset, skipId: String? = nil) async {
+        for clip in clips where clip.id != skipId && self.clipFramings[clip.id] == nil {
+            await self.resolveFraming(for: clip, asset: asset, updateGlobals: false)
+        }
+        print("🎯 [Framing] resolución en fondo completada para \(clips.count) clips")
+    }
+
+    /// FIX-feed: Quick Export con el framing correcto del clip (antes exportaba con
+    /// el framing global del clip 1 o con valores stale).
+    public func quickExport(_ clip: ClipDecision) async {
+        self.selectedClip = clip
+        if let stored = clipFramings[clip.id] {
+            self.applyFraming(stored)
+        } else if let url = localVideoURL {
+            let asset = AVAsset(url: url)
+            await self.resolveFraming(for: clip, asset: asset, updateGlobals: true)
+        }
+        await self.exportCurrentClip()
+    }
+
     /// Selecciona un clip del feed, navega al editor y ejecuta el tracking facial para recortar y centrar el rostro
     public func selectClip(_ clip: ClipDecision) {
         self.selectedClip = clip
@@ -354,22 +557,97 @@ public final class AppViewModel: ObservableObject {
         Task {
             guard let url = localVideoURL else { return }
             let asset = AVAsset(url: url)
-            let (_, avgFace, isScreenShare) = (try? await faceTrackingService.trackSpeaker(in: asset, timeRange: clip.timeRange)) ?? ([], nil, false)
-
-            if let avg = avgFace {
-                self.detectedSpeakerCenterX = avg.midX
-                self.detectedSpeakerCenterY = avg.midY
-                print("🎯 Rostro fijado en X: \(avg.midX), Y: \(avg.midY)")
-            }
-
-            self.isScreenShareDetected = isScreenShare
-            if isScreenShare {
-                self.selectedFramingMode = .splitScreen
-                print("💡 Modo automático fijado a Split-Screen por detección de pantalla de computadora.")
-            } else {
-                self.selectedFramingMode = .autoFaceTrack
-            }
+            await self.resolveFraming(for: clip, asset: asset)
         }
+    }
+
+    /// F5: centros por beat en tiempo-source para el export (un transform por tramo).
+    /// Usa el framing guardado del clip; si el usuario cambió de modo manualmente
+    /// en el editor, se respeta el modo manual con el centro único (nil).
+    /// FIX: un beat sin cara va al centro SIN zoom (mostrar la pantalla tal cual),
+    /// no a la posición de la cara del hook (eso mostraba un trozo random de pantalla).
+    public func perBeatCenters(for clip: ClipDecision) -> [(start: Double, end: Double, x: CGFloat, y: CGFloat, faceWidth: CGFloat?)]? {
+        if let stored = clipFramings[clip.id],
+           stored.mode == .autoFaceTrack, selectedFramingMode == .autoFaceTrack,
+           let beats = clip.storyBeats, !beats.isEmpty,
+           stored.beatCenters.count == beats.count {
+            return stored.beatCenters.map { ($0.start, $0.end, $0.x, $0.y, $0.faceWidth) }
+        }
+        guard selectedFramingMode == .autoFaceTrack,
+              let beats = clip.storyBeats, !beats.isEmpty,
+              beatFaceTracks.count == beats.count else { return nil }
+        return zip(beats, beatFaceTracks).map { beat, track in
+            if let face = track.averageFace, track.confidence >= 0.3 {
+                return (beat.start, beat.end, face.midX, face.midY, face.width)
+            }
+            return (beat.start, beat.end, 0.5, 0.5, nil)
+        }
+    }
+
+    /// Modo de encuadre de un clip (guardado; auto hasta que se resuelva).
+    public func framingMode(for clip: ClipDecision) -> FramingMode {
+        clipFramings[clip.id]?.mode ?? .autoFaceTrack
+    }
+
+    /// F5-fix: centro de encuadre para un instante de la COMPOSICIÓN (preview en vivo).
+    /// Mapea tiempo-comp -> tiempo-source -> beat -> centro de ese beat.
+    public func framingCenter(atCompTime compTime: Double, for clip: ClipDecision) -> (x: CGFloat, y: CGFloat, faceWidth: CGFloat?) {
+        // Override manual del editor: si el modo global difiere del guardado, mandan los globales.
+        if clip.id == selectedClip?.id,
+           let stored = clipFramings[clip.id],
+           selectedFramingMode != stored.mode {
+            return (detectedSpeakerCenterX, detectedSpeakerCenterY, detectedSpeakerFaceWidth)
+        }
+        guard let stored = clipFramings[clip.id] else {
+            // Aún sin resolver (fondo en curso): centro neutro, no el de otro clip.
+            return (0.5, 0.5, nil)
+        }
+        guard stored.mode == .autoFaceTrack,
+              let beats = clip.storyBeats, !beats.isEmpty,
+              stored.beatCenters.count == beats.count else {
+            return (stored.centerX, stored.centerY, stored.faceWidth)
+        }
+        let sourceTime = mapCompositionTime(compTime, for: clip)
+        if let bc = stored.beatCenters.first(where: { sourceTime >= $0.start && sourceTime <= $0.end }) {
+            return (bc.x, bc.y, bc.faceWidth)
+        }
+        return (stored.centerX, stored.centerY, stored.faceWidth)
+    }
+
+    /// Atajo para el clip seleccionado (editor).
+    public func framingCenter(atCompTime compTime: Double) -> (x: CGFloat, y: CGFloat, faceWidth: CGFloat?) {
+        guard let clip = selectedClip else {
+            return (detectedSpeakerCenterX, detectedSpeakerCenterY, detectedSpeakerFaceWidth)
+        }
+        return framingCenter(atCompTime: compTime, for: clip)
+    }
+
+    /// Mapea los timestamps absolutos del video original a la línea de tiempo de la composición exportada (0...duración neta)
+    public func mapWordsToCompositionTime(words: [WordTimestamp], for clip: ClipDecision) -> [WordTimestamp] {
+        let keepSegments = VideoRenderEngine.shared.calculateKeepSegments(for: clip)
+        var mappedWords: [WordTimestamp] = []
+        var compOffset: Double = 0.0
+
+        for seg in keepSegments {
+            let segDuration = seg.end - seg.start
+            let segWords = words.filter { $0.start >= (seg.start - 0.2) && $0.end <= (seg.end + 0.2) }
+            for w in segWords {
+                let mappedStart = compOffset + max(0, w.start - seg.start)
+                let mappedEnd = compOffset + min(segDuration, w.end - seg.start)
+                if mappedEnd > mappedStart {
+                    mappedWords.append(WordTimestamp(
+                        word: w.word,
+                        start: mappedStart,
+                        end: mappedEnd,
+                        db: w.db,
+                        isFiller: w.isFiller,
+                        isDeleted: w.isDeleted
+                    ))
+                }
+            }
+            compOffset += segDuration
+        }
+        return mappedWords
     }
 
     /// Mapea el tiempo del reproductor (0...duración neta) al segundo real del video original
@@ -408,9 +686,11 @@ public final class AppViewModel: ObservableObject {
         }
 
         let realVideoTime = mapCompositionTime(time, for: clip)
+        let minStart = clip.timeRange.start - 1.0
+        let maxEnd = clip.timeRange.end + 1.0
 
-        let clipWords = payload.words.filter { w in
-            w.start >= (clip.timeRange.start - 1.0) && w.end <= (clip.timeRange.end + 1.0)
+        let clipWords: [WordTimestamp] = payload.words.filter { w in
+            w.start >= minStart && w.end <= maxEnd
         }
 
         guard !clipWords.isEmpty else { return (nil, []) }

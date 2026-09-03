@@ -32,6 +32,11 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         UILaunchScreen: {}
+        LSApplicationQueriesSchemes:
+          - instagram-stories
+          - instagram
+          - tiktok
+          - snssdk1233
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:

@@ -40,6 +40,43 @@ public struct FramingPanelView: View {
                 }
             }
 
+            // Selector de Ubicación de la Webcam para Split-Screen
+            if viewModel.selectedFramingMode == .splitScreen {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("UBICACIÓN DE TU WEBCAM")
+                        .font(.system(size: 11, weight: .black))
+                        .foregroundColor(.gray)
+                        .tracking(1)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(WebcamCorner.allCases) { corner in
+                                Button(action: {
+                                    viewModel.setWebcamCorner(corner)
+                                    viewModel.triggerHapticFeedback(type: .light)
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: corner.icon)
+                                            .font(.system(size: 13))
+                                        Text(corner.rawValue)
+                                            .font(.system(size: 12, weight: .bold))
+                                    }
+                                    .foregroundColor(viewModel.selectedWebcamCorner == corner ? .black : .white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        viewModel.selectedWebcamCorner == corner
+                                            ? LinearGradient(colors: [.yellow, .orange], startPoint: .leading, endPoint: .trailing)
+                                            : LinearGradient(colors: [Color.white.opacity(0.08), Color.white.opacity(0.08)], startPoint: .leading, endPoint: .trailing)
+                                    )
+                                    .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Descripción del Modo Activo
             HStack(spacing: 12) {
                 Image(systemName: "info.circle.fill")
@@ -66,7 +103,7 @@ public struct FramingPanelView: View {
         case .autoFaceTrack:
             return "Visión artificial (Vision Framework) detecta y sigue la cara del orador con suavizado cinemático Lerp."
         case .splitScreen:
-            return "Divide el video vertical en 2 tomas: rostro ampliado arriba y pantalla de la computadora abajo."
+            return "Divide el video en 2 tomas: pantalla de la computadora arriba (55%) y webcam con rostro centrado abajo (45%)."
         case .blurredBackground:
             return "Pantalla completa nítida al centro con fondo desenfocado (ideal para leer código y tutoriales de PC)."
         case .manualCrop:

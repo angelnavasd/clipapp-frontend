@@ -12,6 +12,7 @@ public struct VideoConfirmAndTrimView: View {
     @State private var trimStart: Double = 0.0
     @State private var trimEnd: Double = 0.0
     @State private var totalDuration: Double = 0.0
+    @State private var isLoadingDuration: Bool = true
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -183,52 +184,66 @@ public struct VideoConfirmAndTrimView: View {
                                 .lineSpacing(3)
 
                             // Manijas de recorte
-                            VStack(spacing: 12) {
-                                // Control de Inicio
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text("Punto de Inicio:")
-                                            .font(.system(size: 12, weight: .medium))
-                                            .foregroundColor(.gray)
-                                        Spacer()
-                                        Text(formatTime(trimStart))
-                                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                            .foregroundColor(.yellow)
-                                    }
-                                    Slider(
-                                        value: $trimStart,
-                                        in: 0...max(0, trimEnd - 15),
-                                        onEditingChanged: { editing in
-                                            if !editing { seek(to: trimStart) }
-                                        }
-                                    )
-                                    .accentColor(.yellow)
+                            if isLoadingDuration && totalDuration <= 0 {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                                    Text("Preparando línea de tiempo...")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundColor(.gray)
                                 }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 28)
+                                .background(Color.white.opacity(0.04))
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                            } else {
+                                VStack(spacing: 12) {
+                                    // Control de Inicio
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text("Punto de Inicio:")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.gray)
+                                            Spacer()
+                                            Text(formatTime(trimStart))
+                                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.yellow)
+                                        }
+                                        Slider(
+                                            value: $trimStart,
+                                            in: 0...max(0, trimEnd - 15),
+                                            onEditingChanged: { editing in
+                                                if !editing { seek(to: trimStart) }
+                                            }
+                                        )
+                                        .accentColor(.yellow)
+                                    }
 
-                                // Control de Fin
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text("Punto de Fin:")
-                                            .font(.system(size: 12, weight: .medium))
-                                            .foregroundColor(.gray)
-                                        Spacer()
-                                        Text(formatTime(trimEnd))
-                                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                            .foregroundColor(.orange)
-                                    }
-                                    Slider(
-                                        value: $trimEnd,
-                                        in: min(totalDuration, trimStart + 15)...max(15, totalDuration),
-                                        onEditingChanged: { editing in
-                                            if !editing { seek(to: trimEnd - 2) }
+                                    // Control de Fin
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text("Punto de Fin:")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.gray)
+                                            Spacer()
+                                            Text(formatTime(trimEnd))
+                                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.orange)
                                         }
-                                    )
-                                    .accentColor(.orange)
+                                        Slider(
+                                            value: $trimEnd,
+                                            in: min(totalDuration, trimStart + 15)...max(15, totalDuration),
+                                            onEditingChanged: { editing in
+                                                if !editing { seek(to: trimEnd - 2) }
+                                            }
+                                        )
+                                        .accentColor(.orange)
+                                    }
                                 }
+                                .padding(14)
+                                .background(Color.white.opacity(0.04))
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
                             }
-                            .padding(14)
-                            .background(Color.white.opacity(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
 
                             // Resumen del rango seleccionado
                             HStack {
@@ -304,6 +319,14 @@ public struct VideoConfirmAndTrimView: View {
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
 
+        // 1. Si viewModel ya tiene la duración precargada, usarla de inmediato (sin delay ni freeze)
+        if viewModel.videoDuration > 0 {
+            self.totalDuration = viewModel.videoDuration
+            self.trimStart = 0.0
+            self.trimEnd = viewModel.videoDuration
+            self.isLoadingDuration = false
+        }
+
         let p = AVPlayer(url: url)
         p.volume = 1.0
         p.isMuted = false
@@ -312,9 +335,13 @@ public struct VideoConfirmAndTrimView: View {
         Task {
             if let dur = try? await asset.load(.duration).seconds, dur > 0 {
                 await MainActor.run {
-                    self.totalDuration = dur
-                    self.trimStart = 0.0
-                    self.trimEnd = dur
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        self.totalDuration = dur
+                        if self.trimEnd <= 0 || self.trimEnd > dur {
+                            self.trimEnd = dur
+                        }
+                        self.isLoadingDuration = false
+                    }
                 }
             }
         }

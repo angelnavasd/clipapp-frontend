@@ -28,22 +28,41 @@ public struct WordTimestamp: Codable, Identifiable, Equatable, Hashable {
     }
 }
 
+public struct SilenceGap: Codable, Equatable, Sendable {
+    public var start: Double
+    public var end: Double
+
+    public init(start: Double, end: Double) {
+        self.start = start
+        self.end = end
+    }
+}
+
 public struct TranscriptPayload: Codable {
     public let videoId: String
     public let language: String?
     public let videoDuration: Double
     public var words: [WordTimestamp]
+    public var silenceGaps: [SilenceGap]?
+    public var targetDuration: String?
+    public var genre: String?
 
     public init(
         videoId: String,
         language: String? = nil,
         videoDuration: Double,
-        words: [WordTimestamp]
+        words: [WordTimestamp],
+        silenceGaps: [SilenceGap]? = nil,
+        targetDuration: String? = nil,
+        genre: String? = nil
     ) {
         self.videoId = videoId
         self.language = language
         self.videoDuration = videoDuration
         self.words = words
+        self.silenceGaps = silenceGaps
+        self.targetDuration = targetDuration
+        self.genre = genre
     }
 }
 
@@ -97,12 +116,19 @@ public struct StoryBeat: Codable, Identifiable, Equatable, Sendable {
     public let end: Double
     public let role: String
     public let text: String
+    // F2/F5: anotaciones del backend (opcionales para backward-compat con EDLs viejos)
+    public var needsFace: Bool?
+    public var energyScore: Int?
+    public var sentenceIds: [String]?
 
-    public init(start: Double, end: Double, role: String, text: String) {
+    public init(start: Double, end: Double, role: String, text: String, needsFace: Bool? = nil, energyScore: Int? = nil, sentenceIds: [String]? = nil) {
         self.start = start
         self.end = end
         self.role = role
         self.text = text
+        self.needsFace = needsFace
+        self.energyScore = energyScore
+        self.sentenceIds = sentenceIds
     }
 
     public var duration: Double {
@@ -119,6 +145,8 @@ public struct ClipDecision: Codable, Identifiable, Equatable, Sendable {
     public var cutSegments: [CutSegment]
     public var highlightWords: [HighlightWord]
     public var storyBeats: [StoryBeat]?
+    public var detectedFramingMode: String?
+    public var webcamCorner: String?
 
     public init(
         id: String,
@@ -128,7 +156,9 @@ public struct ClipDecision: Codable, Identifiable, Equatable, Sendable {
         timeRange: TimeRange,
         cutSegments: [CutSegment],
         highlightWords: [HighlightWord],
-        storyBeats: [StoryBeat]? = nil
+        storyBeats: [StoryBeat]? = nil,
+        detectedFramingMode: String? = nil,
+        webcamCorner: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -138,6 +168,8 @@ public struct ClipDecision: Codable, Identifiable, Equatable, Sendable {
         self.cutSegments = cutSegments
         self.highlightWords = highlightWords
         self.storyBeats = storyBeats
+        self.detectedFramingMode = detectedFramingMode
+        self.webcamCorner = webcamCorner
     }
 
     /// Duración neta restando los segmentos descartados
@@ -165,9 +197,49 @@ public struct EDLResponse: Codable {
     }
 }
 
+// MARK: - Framing por clip (FIX-feed: cada clip con su propio encuadre)
+
+/// Centro de encuadre de un tramo en tiempo-source.
+public struct BeatCenter: Equatable, Sendable {
+    public let start: Double
+    public let end: Double
+    public let x: CGFloat
+    public let y: CGFloat
+    public let faceWidth: CGFloat?
+
+    public init(start: Double, end: Double, x: CGFloat, y: CGFloat, faceWidth: CGFloat? = nil) {
+        self.start = start
+        self.end = end
+        self.x = x
+        self.y = y
+        self.faceWidth = faceWidth
+    }
+}
+
+/// Framing resuelto para un clip: modo + centro global + centros por beat.
+public struct ClipFraming: Equatable, Sendable {
+    public var mode: FramingMode
+    public var centerX: CGFloat
+    public var centerY: CGFloat
+    public var faceWidth: CGFloat?
+    public var beatCenters: [BeatCenter]
+
+    public init(mode: FramingMode, centerX: CGFloat, centerY: CGFloat, faceWidth: CGFloat? = nil, beatCenters: [BeatCenter] = []) {
+        self.mode = mode
+        self.centerX = centerX
+        self.centerY = centerY
+        self.faceWidth = faceWidth
+        self.beatCenters = beatCenters
+    }
+
+    public static var fallback: ClipFraming {
+        ClipFraming(mode: .autoFaceTrack, centerX: 0.5, centerY: 0.5)
+    }
+}
+
 // MARK: - Editor Configuration Enums
 
-public enum FramingMode: String, CaseIterable, Identifiable {
+public enum FramingMode: String, CaseIterable, Identifiable, Sendable {
     case autoFaceTrack = "Auto Face-Track"
     case splitScreen = "Split-Screen"
     case blurredBackground = "Fondo Borroso"
@@ -181,6 +253,36 @@ public enum FramingMode: String, CaseIterable, Identifiable {
         case .splitScreen: return "rectangle.split.2x1"
         case .blurredBackground: return "sparkles.rectangle.stack"
         case .manualCrop: return "crop"
+        }
+    }
+}
+
+public enum WebcamCorner: String, CaseIterable, Identifiable {
+    case bottomRight = "Inferior Derecha"
+    case bottomLeft = "Inferior Izquierda"
+    case topRight = "Superior Derecha"
+    case topLeft = "Superior Izquierda"
+    case center = "Centro"
+
+    public var id: String { rawValue }
+
+    public var icon: String {
+        switch self {
+        case .bottomRight: return "arrow.down.right.square.fill"
+        case .bottomLeft: return "arrow.down.left.square.fill"
+        case .topRight: return "arrow.up.right.square.fill"
+        case .topLeft: return "arrow.up.left.square.fill"
+        case .center: return "dot.square.fill"
+        }
+    }
+
+    public var centerNormalized: (x: CGFloat, y: CGFloat) {
+        switch self {
+        case .bottomRight: return (0.85, 0.80)
+        case .bottomLeft: return (0.15, 0.80)
+        case .topRight: return (0.85, 0.20)
+        case .topLeft: return (0.15, 0.20)
+        case .center: return (0.50, 0.50)
         }
     }
 }
@@ -210,41 +312,10 @@ public enum SubtitleFontSize: String, CaseIterable, Identifiable {
 
     public var pointSize: CGFloat {
         switch self {
-        case .small: return 22
-        case .medium: return 28
-        case .large: return 36
+        case .small: return 14
+        case .medium: return 17
+        case .large: return 20
         }
-    }
-}
-
-public struct MusicTrackItem: Codable, Identifiable, Equatable {
-    public let id: String
-    public let title: String
-    public let genre: String
-    public let bpm: Int
-    public let duration: Int
-    public let previewUrl: String
-    public let duckingVoiceDb: Double
-    public let duckingMusicDb: Double
-
-    public init(
-        id: String,
-        title: String,
-        genre: String,
-        bpm: Int,
-        duration: Int,
-        previewUrl: String,
-        duckingVoiceDb: Double = 0.0,
-        duckingMusicDb: Double = -18.0
-    ) {
-        self.id = id
-        self.title = title
-        self.genre = genre
-        self.bpm = bpm
-        self.duration = duration
-        self.previewUrl = previewUrl
-        self.duckingVoiceDb = duckingVoiceDb
-        self.duckingMusicDb = duckingMusicDb
     }
 }
 
@@ -278,3 +349,33 @@ public struct LutPresetItem: Codable, Identifiable, Equatable {
         self.cubeFilterName = cubeFilterName
     }
 }
+
+import SwiftUI
+
+extension Color {
+    public init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (255, 0, 0, 0)
+        }
+
+        self.init(
+            .sRGB,
+            red: Double(r) / 255,
+            green: Double(g) / 255,
+            blue: Double(b) / 255,
+            opacity: Double(a) / 255
+        )
+    }
+}
+

@@ -15,6 +15,12 @@ public struct ClipCardView: View {
     @State private var currentTime: Double = 0.0
     @State private var totalDuration: Double = 0.0
     @State private var timeObserverToken: Any? = nil
+    @State private var endObserver: NSObjectProtocol? = nil
+    @State private var failureObserver: NSObjectProtocol? = nil
+    @State private var errorLogObserver: NSObjectProtocol? = nil
+    @State private var sourceSize: CGSize? = nil
+    /// Poster del primer beat: la card NUNCA queda negra (player en fondo, aún cargando, etc).
+    @State private var poster: CGImage? = nil
 
     public init(
         clip: ClipDecision,
@@ -41,13 +47,10 @@ public struct ClipCardView: View {
                     .aspectRatio(9/16, contentMode: .fit)
                     .overlay(
                         Group {
-                            if let player = player {
-                                SmartFramedPlayerView(
-                                    player: player,
-                                    mode: .autoFaceTrack,
-                                    speakerCenterX: 0.5,
-                                    cornerRadius: 22
-                                )
+                            if let player = player, isActive, !viewModel.failedClipIds.contains(clip.id) {
+                                framedPlayer(player)
+                            } else if let poster = poster {
+                                posterView(poster)
                             } else {
                                 VStack(spacing: 8) {
                                     Image(systemName: "film.fill")
@@ -183,11 +186,10 @@ public struct ClipCardView: View {
             }
             .onChange(of: isActive) { _, active in
                 if !active {
-                    player?.pause()
+                    teardownPlayer()
                     isPlaying = false
                 } else {
-                    player?.play()
-                    isPlaying = true
+                    setupPlayer()
                 }
             }
 
@@ -274,6 +276,50 @@ public struct ClipCardView: View {
         )
     }
 
+    /// FIX-feed: cada card usa el framing de SU clip (no el global del clip 1)
+    /// y sigue a los beats durante la reproducción, igual que el export.
+    private func framedPlayer(_ player: AVPlayer) -> SmartFramedPlayerView {
+        let c = viewModel.framingCenter(atCompTime: currentTime, for: clip)
+        return SmartFramedPlayerView(
+            player: player,
+            mode: viewModel.framingMode(for: clip),
+            speakerCenterX: c.x,
+            speakerCenterY: c.y,
+            cornerRadius: 22,
+            sourceSize: sourceSize,
+            speakerFaceWidth: c.faceWidth
+        )
+    }
+
+    /// Poster con el MISMO crop que el video: si el player no está listo, se ve
+    /// el frame correcto en vez de negro.
+    private func posterView(_ cg: CGImage) -> some View {
+        let c = viewModel.framingCenter(atCompTime: currentTime, for: clip)
+        let src = sourceSize ?? CGSize(width: cg.width, height: cg.height)
+        return GeometryReader { geo in
+            let layout = FaceCropCalculator.previewLayout(
+                containerSize: geo.size,
+                sourceSize: src,
+                center: CGPoint(x: c.x, y: c.y),
+                faceWidth: c.faceWidth
+            )
+            Image(cg, scale: 1.0, label: Text(""))
+                .resizable()
+                .frame(width: layout.size.width, height: layout.size.height)
+                .offset(x: layout.offset.width, y: layout.offset.height)
+                .frame(width: geo.size.width, height: geo.size.height)
+                .clipped()
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+    }
+
+    private func posterTime() -> Double {
+        if let beats = clip.storyBeats, let first = beats.first {
+            return (first.start + first.end) / 2.0
+        }
+        return (clip.timeRange.start + clip.timeRange.end) / 2.0
+    }
+
     private func setupPlayer() {
         guard let url = videoURL else { return }
         #if os(iOS)
@@ -282,6 +328,23 @@ public struct ClipCardView: View {
         #endif
 
         Task {
+            let asset = AVURLAsset(url: url)
+            // Poster inmediato (barato, 1 frame): adiós cards negras
+            let gen = AVAssetImageGenerator(asset: asset)
+            gen.appliesPreferredTrackTransform = true
+            gen.maximumSize = CGSize(width: 360, height: 640)
+            if let cg = try? await gen.image(at: CMTime(seconds: posterTime(), preferredTimescale: 600)).image {
+                await MainActor.run { self.poster = cg }
+            }
+
+            // Solo la card activa crea AVPlayer: nada de players pausados en negro al fondo
+            guard isActive else { return }
+            // Tamaño natural para preview idéntico al export
+            if let track = try? await AVURLAsset(url: url).loadTracks(withMediaType: .video).first,
+               let naturalSize = try? await track.load(.naturalSize) {
+                await MainActor.run { self.sourceSize = naturalSize }
+            }
+
             var playerItem: AVPlayerItem? = nil
             var effectiveDuration = max(1.0, clip.netDuration)
             var isComposition = false
@@ -294,7 +357,7 @@ public struct ClipCardView: View {
                     playerItem = AVPlayerItem(asset: comp)
                     effectiveDuration = compDur
                     isComposition = true
-                    print("🎬 [ClipCard] Composición multi-corte creada con éxito (\(String(format: "%.1f", compDur))s)")
+                    print("🎬 [ClipCard] Composición multi-corte creada (\(String(format: "%.1f", compDur))s)")
                 } else {
                     print("⚠️ [ClipCard] Composición devolvió duración 0 o demasiado corta: \(compDur)s")
                 }
@@ -336,7 +399,7 @@ public struct ClipCardView: View {
                     self.currentTime = time.seconds
                 }
 
-                NotificationCenter.default.addObserver(
+                self.endObserver = NotificationCenter.default.addObserver(
                     forName: .AVPlayerItemDidPlayToEndTime,
                     object: p.currentItem,
                     queue: .main
@@ -349,6 +412,28 @@ public struct ClipCardView: View {
                     }
                     if self.isActive { p.play() }
                 }
+
+                // DIAGNÓSTICO "reproduce y se queda negro": si el item muere,
+                // loguear el error REAL y caer al poster (nunca negro eterno).
+                self.failureObserver = NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemFailedToPlayToEndTime,
+                    object: p.currentItem,
+                    queue: .main
+                ) { note in
+                    let err = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError)
+                    print("❌ [ClipCard] ITEM FALLÓ clip=\(clip.id): \(err?.domain ?? "?") \(err?.code ?? -1) \(err?.localizedDescription ?? "sin descripción")")
+                    viewModel.notePlaybackFailure(clip.id)
+                }
+                self.errorLogObserver = NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemNewErrorLogEntry,
+                    object: p.currentItem,
+                    queue: .main
+                ) { _ in
+                    if let log = p.currentItem?.errorLog(),
+                       let ev = log.events.last {
+                        print("⚠️ [ClipCard] errorLog clip=\(clip.id): \(ev.errorStatusCode) \(ev.errorComment ?? "")")
+                    }
+                }
             }
         }
     }
@@ -358,6 +443,9 @@ public struct ClipCardView: View {
             player.removeTimeObserver(token)
         }
         timeObserverToken = nil
+        if let t = endObserver { NotificationCenter.default.removeObserver(t); endObserver = nil }
+        if let t = failureObserver { NotificationCenter.default.removeObserver(t); failureObserver = nil }
+        if let t = errorLogObserver { NotificationCenter.default.removeObserver(t); errorLogObserver = nil }
         player?.pause()
         player = nil
     }

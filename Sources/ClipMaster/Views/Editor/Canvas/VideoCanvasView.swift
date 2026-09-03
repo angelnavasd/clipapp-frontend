@@ -4,38 +4,44 @@ import AVKit
 public struct VideoCanvasView: View {
     @ObservedObject var viewModel: AppViewModel
     @Binding var isPlaying: Bool
+    @Binding var currentPlaybackTime: Double
+    @Binding var totalDuration: Double
+    @Binding var seekActionTime: Double?
+
     @State private var player: AVPlayer? = nil
     @State private var timeObserverToken: Any? = nil
-    @State private var currentPlaybackTime: Double = 0.0
-    @State private var totalDuration: Double = 0.0
     @State private var dragOffset: CGSize = .zero
+    @State private var sourceSize: CGSize? = nil
 
-    public init(viewModel: AppViewModel, isPlaying: Binding<Bool> = .constant(false)) {
+    public init(
+        viewModel: AppViewModel,
+        isPlaying: Binding<Bool>,
+        currentPlaybackTime: Binding<Double>,
+        totalDuration: Binding<Double>,
+        seekActionTime: Binding<Double?>
+    ) {
         self.viewModel = viewModel
         self._isPlaying = isPlaying
+        self._currentPlaybackTime = currentPlaybackTime
+        self._totalDuration = totalDuration
+        self._seekActionTime = seekActionTime
     }
 
     public var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 20)
+            // Contenedor 9:16 del Video Principal
+            RoundedRectangle(cornerRadius: 22)
                 .fill(Color.black)
                 .aspectRatio(9/16, contentMode: .fit)
                 .overlay(
                     Group {
                         if let player = player {
-                            SmartFramedPlayerView(
-                                player: player,
-                                mode: viewModel.selectedFramingMode,
-                                speakerCenterX: viewModel.detectedSpeakerCenterX,
-                                speakerCenterY: viewModel.detectedSpeakerCenterY,
-                                cornerRadius: 20
-                            )
+                            framedPlayer(player)
                         } else {
                             VStack(spacing: 8) {
-                                Image(systemName: "film")
-                                    .font(.system(size: 32))
-                                    .foregroundColor(.gray)
-                                Text("Cargando Reproductor...")
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                                Text("Cargando video...")
                                     .font(.system(size: 12))
                                     .foregroundColor(.gray)
                             }
@@ -46,22 +52,24 @@ public struct VideoCanvasView: View {
                     togglePlayPause()
                 }
 
-            // Filtro / LUT preview overlay (simulado mediante mezcla de color y contraste)
+            // Filtro / LUT preview overlay
             if let lut = viewModel.selectedLutPreset {
                 Color(hex: lut.thumbnailColor)
                     .opacity(0.12)
                     .blendMode(.overlay)
                     .allowsHitTesting(false)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
             }
 
-            // Subtítulos Dinámicos Interactivos (Arrastrables verticalmente y sincronizados en vivo)
+            // Subtítulos Dinámicos (Arrastrables verticalmente con flujo multilínea natural y restricción de ancho)
             GeometryReader { geo in
+                let videoWidth = min(geo.size.width, geo.size.height * 9.0 / 16.0)
+                let maxSubtitleWidth = max(140.0, videoWidth * 0.84)
                 let currentY = geo.size.height * viewModel.subtitleVerticalOffset + dragOffset.height
 
                 VStack {
-                    subtitlePreviewBadge()
-                        .position(x: geo.size.width / 2.0, y: max(60, min(geo.size.height - 80, currentY)))
+                    subtitlePreviewBadge(maxWidth: maxSubtitleWidth)
+                        .position(x: geo.size.width / 2.0, y: max(50, min(geo.size.height - 50, currentY)))
                         .gesture(
                             DragGesture()
                                 .onChanged { value in
@@ -69,117 +77,49 @@ public struct VideoCanvasView: View {
                                 }
                                 .onEnded { value in
                                     let newY = currentY
-                                    viewModel.subtitleVerticalOffset = min(max(newY / geo.size.height, 0.2), 0.8)
+                                    viewModel.subtitleVerticalOffset = min(max(newY / geo.size.height, 0.2), 0.82)
                                     dragOffset = .zero
-                                    viewModel.triggerHapticFeedback(type: .medium)
+                                    viewModel.triggerHapticFeedback(type: .light)
                                 }
                         )
                 }
             }
 
-            // Overlay de Zona Segura
-            if viewModel.showSafeZoneOverlay {
-                SafeZoneOverlayView()
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
-            }
-
-            // Botón central flotante si está pausado
+            // Botón central flotante de Play cuando está pausado
             if !isPlaying {
                 Button(action: togglePlayPause) {
                     Circle()
-                        .fill(Color.black.opacity(0.65))
-                        .frame(width: 52, height: 52)
+                        .fill(Color.black.opacity(0.55))
+                        .frame(width: 56, height: 56)
                         .overlay(
                             Image(systemName: "play.fill")
-                                .font(.system(size: 20))
+                                .font(.system(size: 22))
                                 .foregroundColor(.white)
                                 .offset(x: 2)
                         )
                 }
             }
 
-            // Barra inferior de controles completos (Scrubber, -5s, +5s, time, Safe Zone)
+            // Badge superior discreto con el modo de encuadre activo
             VStack {
-                // Barra superior de estado
                 HStack {
-                    Text(viewModel.selectedFramingMode.rawValue)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white.opacity(0.9))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.55))
-                        .clipShape(Capsule())
+                    HStack(spacing: 5) {
+                        Image(systemName: "person.crop.rectangle")
+                            .font(.system(size: 10))
+                        Text(viewModel.selectedFramingMode.rawValue)
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundColor(.white.opacity(0.85))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.6))
+                    .clipShape(Capsule())
 
                     Spacer()
-
-                    // Toggle Safe Zone
-                    Button(action: {
-                        viewModel.showSafeZoneOverlay.toggle()
-                        viewModel.triggerHapticFeedback(type: .light)
-                    }) {
-                        Image(systemName: viewModel.showSafeZoneOverlay ? "eye.fill" : "eye.slash.fill")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(viewModel.showSafeZoneOverlay ? .yellow : .white.opacity(0.7))
-                            .padding(8)
-                            .background(Color.black.opacity(0.55))
-                            .clipShape(Circle())
-                    }
                 }
-                .padding(10)
+                .padding(12)
 
                 Spacer()
-
-                // Controles de transporte
-                VStack(spacing: 4) {
-                    // Scrubber Slider
-                    Slider(
-                        value: Binding(
-                            get: { currentPlaybackTime },
-                            set: { seek(to: $0) }
-                        ),
-                        in: 0...max(1.0, totalDuration)
-                    )
-                    .accentColor(.orange)
-
-                    HStack {
-                        Text(formatTime(currentPlaybackTime))
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.85))
-
-                        Spacer()
-
-                        HStack(spacing: 16) {
-                            Button(action: { seek(to: max(0, currentPlaybackTime - 5)) }) {
-                                Image(systemName: "gobackward.5")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.white)
-                            }
-
-                            Button(action: togglePlayPause) {
-                                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundColor(.orange)
-                            }
-
-                            Button(action: { seek(to: min(totalDuration, currentPlaybackTime + 5)) }) {
-                                Image(systemName: "goforward.5")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.white)
-                            }
-                        }
-
-                        Spacer()
-
-                        Text(formatTime(totalDuration))
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.6))
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.65))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .padding(10)
             }
         }
         .onAppear {
@@ -188,6 +128,41 @@ public struct VideoCanvasView: View {
         .onDisappear {
             teardownPlayer()
         }
+        .onChange(of: isPlaying) { _, playing in
+            if playing {
+                player?.play()
+            } else {
+                player?.pause()
+            }
+        }
+        .onChange(of: seekActionTime) { _, target in
+            if let t = target {
+                seek(to: t)
+                seekActionTime = nil
+            }
+        }
+        .onChange(of: viewModel.selectedFramingMode) { _, _ in
+            setupPlayer()
+        }
+        .onChange(of: viewModel.playerReloadToken) { _, _ in
+            setupPlayer()
+        }
+    }
+
+    // MARK: - Configuración de Reproductor
+    /// Helper separado para no saturar el type-checker del body.
+    /// F5-fix: el centro sigue al beat actual (igual que el export por tramos).
+    private func framedPlayer(_ player: AVPlayer) -> SmartFramedPlayerView {
+        let c = viewModel.framingCenter(atCompTime: currentPlaybackTime)
+        return SmartFramedPlayerView(
+            player: player,
+            mode: viewModel.selectedFramingMode,
+            speakerCenterX: c.x,
+            speakerCenterY: c.y,
+            cornerRadius: 22,
+            sourceSize: sourceSize,
+            speakerFaceWidth: c.faceWidth
+        )
     }
 
     private func setupPlayer() {
@@ -202,7 +177,12 @@ public struct VideoCanvasView: View {
             var effectiveDuration = max(1.0, clip.netDuration)
             var isComposition = false
 
-            // Intentar construir composición en memoria con jump cuts si tiene storyBeats
+            // F4: conocer el tamaño natural para preview idéntico al export
+            if let track = try? await AVURLAsset(url: url).loadTracks(withMediaType: .video).first,
+               let naturalSize = try? await track.load(.naturalSize) {
+                await MainActor.run { self.sourceSize = naturalSize }
+            }
+
             do {
                 let comp = try await viewModel.buildComposition(for: clip, sourceURL: url)
                 let compDur = (try? await comp.load(.duration).seconds) ?? 0.0
@@ -211,8 +191,6 @@ public struct VideoCanvasView: View {
                     effectiveDuration = compDur
                     isComposition = true
                     print("🎬 [Editor] Composición creada con éxito (\(String(format: "%.1f", compDur))s)")
-                } else {
-                    print("⚠️ [Editor] Composición devolvió duración demasiado corta: \(compDur)s")
                 }
             } catch {
                 print("❌ [Editor] Error construyendo composición: \(error). Usando fallback directo.")
@@ -259,6 +237,16 @@ public struct VideoCanvasView: View {
                     }
                     p.play()
                 }
+
+                // Diagnóstico: loguear el error real si el item muere en negro
+                NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemFailedToPlayToEndTime,
+                    object: p.currentItem,
+                    queue: .main
+                ) { note in
+                    let err = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError)
+                    print("❌ [Editor] ITEM FALLÓ: \(err?.domain ?? "?") \(err?.code ?? -1) \(err?.localizedDescription ?? "sin descripción")")
+                }
             }
         }
     }
@@ -291,107 +279,69 @@ public struct VideoCanvasView: View {
         self.currentPlaybackTime = seconds
     }
 
-    private func formatTime(_ seconds: Double) -> String {
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return String(format: "%02d:%02d", m, s)
-    }
-
-    // MARK: - Subtítulos Sincronizados Palabra por Palabra en Tiempo Real
+    // MARK: - Subtítulos Sincronizados con Flujo de Texto Continuo
     @ViewBuilder
-    private func subtitlePreviewBadge() -> some View {
+    private func subtitlePreviewBadge(maxWidth: CGFloat) -> some View {
         let (activeWord, contextWords) = viewModel.activeWords(at: currentPlaybackTime)
 
         if !contextWords.isEmpty {
-            switch viewModel.selectedSubtitleStyle {
-            case .hormozi:
-                HStack(spacing: 6) {
-                    ForEach(contextWords, id: \.id) { w in
-                        let isActive = (w.id == activeWord?.id)
-                        Text(w.word.uppercased())
-                            .font(.system(
-                                size: isActive
-                                    ? viewModel.selectedSubtitleSize.pointSize * 1.15
-                                    : viewModel.selectedSubtitleSize.pointSize,
-                                weight: .black,
-                                design: .rounded
-                            ))
-                            .foregroundColor(isActive ? Color(red: 1.0, green: 0.9, blue: 0.0) : .white)
-                            .shadow(color: .black, radius: 4, x: 2, y: 2)
-                            .shadow(color: .black, radius: 4, x: -2, y: -2)
-                            .scaleEffect(isActive ? 1.08 : 1.0)
-                            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isActive)
-                    }
-                }
-                .padding(.horizontal, 16)
+            let baseSize = viewModel.selectedSubtitleSize.pointSize
 
-            case .minimalDark:
-                HStack(spacing: 5) {
-                    ForEach(contextWords, id: \.id) { w in
-                        let isActive = (w.id == activeWord?.id)
-                        Text(w.word)
-                            .font(.system(size: viewModel.selectedSubtitleSize.pointSize * 0.85, weight: isActive ? .bold : .medium))
-                            .foregroundColor(isActive ? Color(red: 0.3, green: 0.8, blue: 1.0) : .white)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.8))
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.15), lineWidth: 1))
+            contextWords.enumerated().reduce(Text("")) { result, item in
+                let (index, w) = item
+                let isActive = (w.id == activeWord?.id)
+                let isPast = w.end <= currentPlaybackTime
 
-            case .karaoke:
-                HStack(spacing: 5) {
-                    ForEach(contextWords, id: \.id) { w in
-                        let isPast = w.end <= currentPlaybackTime
-                        let isActive = (w.id == activeWord?.id)
-                        Text(w.word)
-                            .font(.system(size: viewModel.selectedSubtitleSize.pointSize * 0.9, weight: .bold))
-                            .foregroundColor(
-                                isActive ? Color(red: 0.2, green: 0.9, blue: 1.0)
-                                : (isPast ? Color(red: 0.2, green: 0.7, blue: 0.9) : .white.opacity(0.6))
-                            )
-                            .shadow(color: .black, radius: 3)
-                    }
+                let wordColor: Color
+                let wordWeight: Font.Weight
+
+                switch viewModel.selectedSubtitleStyle {
+                case .hormozi:
+                    wordColor = isActive ? Color(red: 1.0, green: 0.9, blue: 0.0) : .white
+                    wordWeight = .black
+                case .minimalDark:
+                    wordColor = isActive ? Color(red: 0.3, green: 0.85, blue: 1.0) : .white
+                    wordWeight = isActive ? .bold : .medium
+                case .karaoke:
+                    wordColor = isActive
+                        ? Color(red: 0.2, green: 0.95, blue: 1.0)
+                        : (isPast ? Color.white.opacity(0.85) : Color.white.opacity(0.45))
+                    wordWeight = .bold
                 }
-                .padding(.horizontal, 16)
+
+                let textChunk = Text(w.word + (index < contextWords.count - 1 ? " " : ""))
+                    .font(.system(size: baseSize, weight: wordWeight, design: .rounded))
+                    .foregroundColor(wordColor)
+
+                return result + textChunk
             }
+            .multilineTextAlignment(.center)
+            .shadow(color: .black.opacity(0.9), radius: 3, x: 1, y: 1)
+            .shadow(color: .black.opacity(0.9), radius: 3, x: -1, y: -1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                viewModel.selectedSubtitleStyle == .minimalDark
+                    ? Color.black.opacity(0.75)
+                    : Color.black.opacity(0.3)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: maxWidth)
         } else {
-            // Fallback inicial con el gancho editorial
-            let hookText = viewModel.selectedClip?.hook.uppercased() ?? "CLIPMASTER"
-            Text(hookText)
-                .font(.system(size: viewModel.selectedSubtitleSize.pointSize, weight: .black, design: .rounded))
-                .foregroundColor(.yellow)
-                .shadow(color: .black, radius: 4, x: 2, y: 2)
-                .shadow(color: .black, radius: 4, x: -2, y: -2)
-                .padding(.horizontal, 16)
+            // Fallback inicial con gancho editorial
+            let hookText = viewModel.selectedClip?.hook ?? ""
+            if !hookText.isEmpty {
+                Text(hookText)
+                    .font(.system(size: viewModel.selectedSubtitleSize.pointSize, weight: .bold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .shadow(color: .black.opacity(0.9), radius: 3, x: 1, y: 1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .frame(maxWidth: maxWidth)
+            }
         }
-    }
-}
-
-// Extensión para convertir colores Hex
-extension Color {
-    init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch hex.count {
-        case 3: // RGB (12-bit)
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6: // RGB (24-bit)
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8: // ARGB (32-bit)
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 0, 0, 0)
-        }
-        self.init(
-            .sRGB,
-            red: Double(r) / 255,
-            green: Double(g) / 255,
-            blue: Double(b) / 255,
-            opacity: Double(a) / 255
-        )
     }
 }

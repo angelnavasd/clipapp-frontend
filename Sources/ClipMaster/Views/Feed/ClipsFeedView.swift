@@ -57,9 +57,8 @@ public struct ClipsFeedView: View {
                                     viewModel.selectClipForEditing(clip)
                                 },
                                 onQuickExport: {
-                                    viewModel.selectedClip = clip
                                     Task {
-                                        await viewModel.exportCurrentClip()
+                                        await viewModel.quickExport(clip)
                                     }
                                 }
                             )
