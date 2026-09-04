@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		041780A1C68DF9EBFC0505D8 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2491EE5A5413C00608777D0B /* AppViewModel.swift */; };
-		04E2A74119A18D07A183FBA4 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56E054E29C770DB0541954FF /* ProfileView.swift */; };
 		0DE98FE8E62314D3D43DF547 /* AudioLevelAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C49F0F9B3E8636E818E6B2B2 /* AudioLevelAnalyzer.swift */; };
 		12E6B09561718812148840F9 /* ColorFilterPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52093CC33D9F30EC05A121B2 /* ColorFilterPanelView.swift */; };
 		199A0F797F2CA8802C641429 /* SocialShareService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56B0F3C3D9D5CDAAE4229561 /* SocialShareService.swift */; };
@@ -18,8 +17,8 @@
 		2B6F7BE9C0F65F607508CCEF /* ProcessingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9032FDCF38DAC0CA78C242D4 /* ProcessingView.swift */; };
 		30D0E3BD67F8379B7DB7E56B /* SafeZoneOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A79E68DBF961963A11B9A6 /* SafeZoneOverlayView.swift */; };
 		39E75C50D7256782D1B8CBF8 /* FaceTrackingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 355CDB016E525CA4DC894D4F /* FaceTrackingService.swift */; };
+		F1E2D3C4B5A69788796A5B4 /* FaceTrackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5 /* FaceTrackService.swift */; };
 		46B1F76D80B25AE63430B760 /* FramingPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A7F1E94A0B9635CA180D18 /* FramingPanelView.swift */; };
-		517DE8AACBE97CD39264B42D /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98EFA0585B43CF0D101F458D /* LoginView.swift */; };
 		5322C9A86CB79D28A469B1B0 /* CaptionsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FDCBCC355528246B024CAA5 /* CaptionsPanelView.swift */; };
 		562437B6E22B48F580005246 /* ClipMasterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73E5DBAA3289B4AB18BAF9A /* ClipMasterApp.swift */; };
 		5BEB727C2B997E5D17BAA62A /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF4EECD171D476FCDAB00563 /* HomeView.swift */; };
@@ -53,18 +52,17 @@
 		2DEBC74EE9D8891BF61EA399 /* SmartFramedPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartFramedPlayerView.swift; sourceTree = "<group>"; };
 		2EB0EF156171DE01B0CA1973 /* SplashScreenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashScreenView.swift; sourceTree = "<group>"; };
 		355CDB016E525CA4DC894D4F /* FaceTrackingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceTrackingService.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5 /* FaceTrackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceTrackService.swift; sourceTree = "<group>"; };
 		35C3EA0804B46EF5A8DD103D /* FaceCropCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceCropCalculator.swift; sourceTree = "<group>"; };
 		3FDCBCC355528246B024CAA5 /* CaptionsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionsPanelView.swift; sourceTree = "<group>"; };
 		481693DDF65170467076B018 /* SubtitleOverlayGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleOverlayGenerator.swift; sourceTree = "<group>"; };
 		52093CC33D9F30EC05A121B2 /* ColorFilterPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorFilterPanelView.swift; sourceTree = "<group>"; };
 		56B0F3C3D9D5CDAAE4229561 /* SocialShareService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialShareService.swift; sourceTree = "<group>"; };
-		56E054E29C770DB0541954FF /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
 		5B4FF041050B15A3D260EA51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		6AA8EBCAD67EAEBF46D66EE6 /* TranscriptDrawerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDrawerSheet.swift; sourceTree = "<group>"; };
 		84A5122FB9DDB13BCBB60121 /* ClipsFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipsFeedView.swift; sourceTree = "<group>"; };
 		9032FDCF38DAC0CA78C242D4 /* ProcessingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessingView.swift; sourceTree = "<group>"; };
 		987B71CBE061175D2D9E5155 /* TextTimelineEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextTimelineEditorView.swift; sourceTree = "<group>"; };
-		98EFA0585B43CF0D101F458D /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		A8E2AF862A28DC8097B9C5DE /* ExportSuccessSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSuccessSheet.swift; sourceTree = "<group>"; };
 		A9C8B42D9E66D67004D9A00F /* ClipsAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipsAPIService.swift; sourceTree = "<group>"; };
 		AF4EECD171D476FCDAB00563 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -113,7 +111,6 @@
 		0E679F5A9F7335C858B0F8AA /* Profile */ = {
 			isa = PBXGroup;
 			children = (
-				56E054E29C770DB0541954FF /* ProfileView.swift */,
 			);
 			path = Profile;
 			sourceTree = "<group>";
@@ -151,6 +148,7 @@
 			isa = PBXGroup;
 			children = (
 				355CDB016E525CA4DC894D4F /* FaceTrackingService.swift */,
+				A1B2C3D4E5F60718293A4B5 /* FaceTrackService.swift */,
 			);
 			path = Vision;
 			sourceTree = "<group>";
@@ -158,7 +156,6 @@
 		5F30E011144DF0B8C4855720 /* Auth */ = {
 			isa = PBXGroup;
 			children = (
-				98EFA0585B43CF0D101F458D /* LoginView.swift */,
 			);
 			path = Auth;
 			sourceTree = "<group>";
@@ -397,13 +394,12 @@
 				1CDB6F80C61DC0A64FA63ADC /* ExportSuccessSheet.swift in Sources */,
 				655AFC009430753DBF65E08D /* FaceCropCalculator.swift in Sources */,
 				39E75C50D7256782D1B8CBF8 /* FaceTrackingService.swift in Sources */,
+				F1E2D3C4B5A69788796A5B4 /* FaceTrackService.swift in Sources */,
 				83460BE33988C346DBD18E51 /* FrameAnalysis.swift in Sources */,
 				E9863F93A00A105ADAD8401D /* FrameExtractorService.swift in Sources */,
 				46B1F76D80B25AE63430B760 /* FramingPanelView.swift in Sources */,
 				5BEB727C2B997E5D17BAA62A /* HomeView.swift in Sources */,
-				517DE8AACBE97CD39264B42D /* LoginView.swift in Sources */,
 				2B6F7BE9C0F65F607508CCEF /* ProcessingView.swift in Sources */,
-				04E2A74119A18D07A183FBA4 /* ProfileView.swift in Sources */,
 				30D0E3BD67F8379B7DB7E56B /* SafeZoneOverlayView.swift in Sources */,
 				90C2EEDF36F354579BC41A08 /* SceneLayoutEngine.swift in Sources */,
 				20C296ABCC9290F99F5642E0 /* SmartFramedPlayerView.swift in Sources */,

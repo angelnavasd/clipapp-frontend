@@ -288,13 +288,13 @@ final class ClipMasterTests: XCTestCase {
     }
 
     func testWindowHeightFraction() {
-        // PiP (cara 0.10) -> 0.62 verificado visualmente (primer plano seguro);
-        // close-up (0.30+) -> 1.0 intacto. Suelo 0.62 absorbe el error del VLM.
-        XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.10), 0.62, accuracy: 0.001)
-        XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.20), 0.68, accuracy: 0.001)
+        // PiP (cara 0.10) -> 0.74 (primer plano seguro sin pixelar);
+        // Hablante a cámara (0.18+) -> 1.0 (aspect-fill estándar sin sobre-zoom).
+        XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.10), 0.74, accuracy: 0.001)
+        XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.20), 1.0, accuracy: 0.001)
         XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.30), 1.0, accuracy: 0.001)
         XCTAssertEqual(FaceCropCalculator.windowHeightFraction(faceWidth: nil), 1.0, accuracy: 0.001)
-        XCTAssertGreaterThanOrEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.02), 0.62)
+        XCTAssertGreaterThanOrEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.02), 0.74)
         XCTAssertLessThanOrEqual(FaceCropCalculator.windowHeightFraction(faceWidth: 0.9), 1.0)
     }
 
@@ -431,5 +431,71 @@ final class ClipMasterTests: XCTestCase {
         XCTAssertEqual(FrameExtractorService.thumbTimes(forBeat: 10, end: 20).count, 2)
         XCTAssertEqual(FrameExtractorService.thumbTimes(forBeat: 10, end: 11).count, 1)
         XCTAssertTrue(FrameExtractorService.thumbTimes(forBeat: 20, end: 10).isEmpty)
+    }
+
+
+    func testBeatIndexParsing() {
+        XCTAssertEqual(AppViewModel.beatIndex(of: "b2t0"), 2)
+        XCTAssertEqual(AppViewModel.beatIndex(of: "b0t444.845"), 0)
+        XCTAssertNil(AppViewModel.beatIndex(of: "xx"))
+    }
+
+    // MARK: - orientedSize (rotación iPhone)
+
+    func testOrientedSizeTraspone90() {
+        // iPhone landscape: píxeles 1080x1920 + rotación 90° => display 1920x1080
+        let rot = CGAffineTransform(rotationAngle: .pi / 2)
+        let s = FaceCropCalculator.orientedSize(
+            naturalSize: CGSize(width: 1080, height: 1920), preferredTransform: rot)
+        XCTAssertEqual(s.width, 1920, accuracy: 0.001)
+        XCTAssertEqual(s.height, 1080, accuracy: 0.001)
+    }
+
+    func testOrientedSizeIdentidadNoToca() {
+        let s = FaceCropCalculator.orientedSize(
+            naturalSize: CGSize(width: 1920, height: 1080), preferredTransform: .identity)
+        XCTAssertEqual(s.width, 1920, accuracy: 0.001)
+        XCTAssertEqual(s.height, 1080, accuracy: 0.001)
+    }
+
+    // MARK: - FaceTrackService (curva continua)
+
+    private func raw(_ t: Double, _ x: Double, _ y: Double, _ w: Double = 0.2) -> (t: Double, rect: CGRect?, conf: Double) {
+        (t, CGRect(x: x - w / 2, y: y - w / 2, width: w, height: w), 0.9)
+    }
+
+    func testSmoothSigueDerivaSinSaltos() {
+        // Cara a la deriva lenta 0.3 -> 0.5: la curva la sigue, sin cortes.
+        let raws = [raw(0, 0.3, 0.4), raw(1, 0.4, 0.4), raw(2, 0.5, 0.4)]
+        let track = FaceTrackService.smooth(raws: raws, range: (0, 2))
+        XCTAssertTrue(track.hardCuts.isEmpty)
+        XCTAssertEqual(track.samples.count, 3)
+        XCTAssertLessThan(track.samples[1].x, 0.5)
+        XCTAssertGreaterThan(track.samples[2].x, track.samples[0].x)
+    }
+
+    func testSmoothCorteDuroEnSalto() {
+        // Salto 0.3 -> 0.9: otra toma, corte duro y reanclaje.
+        let raws = [raw(0, 0.3, 0.4), raw(1, 0.9, 0.4)]
+        let track = FaceTrackService.smooth(raws: raws, range: (0, 1))
+        XCTAssertEqual(track.hardCuts, [1])
+        XCTAssertEqual(track.samples[1].x, 0.9, accuracy: 0.001)
+    }
+
+    func testSmoothSinCaraMantiene() {
+        // Gap sin cara: mantiene última posición con conf 0.
+        let raws = [raw(0, 0.4, 0.4), (t: 1.0, rect: nil as CGRect?, conf: 0.0)]
+        let track = FaceTrackService.smooth(raws: raws, range: (0, 1))
+        XCTAssertEqual(track.samples[1].x, track.samples[0].x, accuracy: 0.001)
+        XCTAssertEqual(track.samples[1].conf, 0, accuracy: 0.001)
+    }
+
+    func testCenterInterpola() {
+        let track = FaceTrackService.Track(samples: [
+            FaceTrackService.Sample(t: 0, x: 0.3, y: 0.4, w: 0.2, conf: 1),
+            FaceTrackService.Sample(t: 2, x: 0.5, y: 0.4, w: 0.2, conf: 1),
+        ], hardCuts: [])
+        let c = FaceTrackService.center(at: 1, in: track)
+        XCTAssertEqual(c.x, 0.4, accuracy: 0.001)
     }
 }

@@ -192,7 +192,9 @@ public final class VideoRenderEngine {
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
 
-        let sourceDimensions = try await sourceVideoTrack.load(.naturalSize)
+        let rawSize = try await sourceVideoTrack.load(.naturalSize)
+        let rawTransform = (try? await sourceVideoTrack.load(.preferredTransform)) ?? .identity
+        let sourceDimensions = FaceCropCalculator.orientedSize(naturalSize: rawSize, preferredTransform: rawTransform)
 
         if config.framingMode == .splitScreen, let track2 = compVideoTrack2 {
             let split = FaceCropCalculator.splitFraction
@@ -206,7 +208,7 @@ public final class VideoRenderEngine {
             topTransform = topTransform.scaledBy(x: topScale, y: topScale)
 
             let layerInstruction1 = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideoTrack)
-            layerInstruction1.setTransform(topTransform, at: .zero)
+            layerInstruction1.setTransform(rawTransform.concatenating(topTransform), at: .zero)
 
             // Track 2: webcam con crop del MISMO aspect de su zona -> la llena exacta
             let zoneAspect = config.outputSize.width / bottomHeight
@@ -227,7 +229,7 @@ public final class VideoRenderEngine {
             bottomTransform = bottomTransform.translatedBy(x: -cropX, y: -cropY)
 
             let layerInstruction2 = AVMutableVideoCompositionLayerInstruction(assetTrack: track2)
-            layerInstruction2.setTransform(bottomTransform, at: .zero)
+            layerInstruction2.setTransform(rawTransform.concatenating(bottomTransform), at: .zero)
             layerInstruction2.setCropRectangle(
                 CGRect(x: cropX, y: cropY, width: cropW, height: cropH),
                 at: .zero
@@ -240,23 +242,121 @@ public final class VideoRenderEngine {
             // F5: un transform por segmento de composición cuando hay centros por beat
             if config.framingMode == .autoFaceTrack, let perBeat = config.perBeatCenters, !perBeat.isEmpty {
                 var compCursor = CMTime.zero
+                struct ScheduledItem {
+                    let time: CMTime
+                    let transform: CGAffineTransform
+                    let center: CGPoint
+                    let isBeatBoundary: Bool
+                }
+                var scheduled: [ScheduledItem] = []
                 for segment in clampedSegments {
                     let segDuration = segment.end - segment.start
                     guard segDuration > 0.05 else { continue }
-                    let mid = (segment.start + segment.end) / 2.0
-                    let beat = perBeat.first(where: { mid >= $0.start && mid <= $0.end })
-                    let cx = beat?.x ?? config.speakerCenterX
-                    let cy = beat?.y ?? config.speakerCenterY
-                    let fw = beat?.faceWidth ?? config.speakerFaceWidth
-                    let t = FaceCropCalculator.exportTransform(
-                        sourceSize: sourceDimensions,
-                        targetSize: config.outputSize,
-                        center: CGPoint(x: cx, y: cy),
-                        faceWidth: fw,
-                        mode: config.framingMode
-                    )
-                    layerInstruction.setTransform(t, at: compCursor)
+                    // Buscar centros de beat o sub-tomas que intersecten este segmento
+                    let matching = perBeat.filter { $0.end > segment.start + 0.05 && $0.start < segment.end - 0.05 }
+                        .sorted(by: { $0.start < $1.start })
+
+                    if matching.count > 1 {
+                        var isFirstSub = true
+                        for sub in matching {
+                            let subStart = max(segment.start, sub.start)
+                            let subEnd = min(segment.end, sub.end)
+                            guard subEnd - subStart > 0.05 else { continue }
+                            let offsetInSeg = subStart - segment.start
+                            let transformTime = CMTimeAdd(compCursor, CMTime(seconds: offsetInSeg, preferredTimescale: 600))
+                            let t = FaceCropCalculator.exportTransform(
+                                sourceSize: sourceDimensions,
+                                targetSize: config.outputSize,
+                                center: CGPoint(x: sub.x, y: sub.y),
+                                faceWidth: sub.faceWidth,
+                                mode: config.framingMode
+                            )
+                            scheduled.append(ScheduledItem(
+                                time: transformTime,
+                                transform: rawTransform.concatenating(t),
+                                center: CGPoint(x: sub.x, y: sub.y),
+                                isBeatBoundary: isFirstSub
+                            ))
+                            isFirstSub = false
+                        }
+                    } else {
+                        let mid = (segment.start + segment.end) / 2.0
+                        let beat = matching.first ?? perBeat.first(where: { mid >= $0.start && mid <= $0.end })
+                        let cx = beat?.x ?? config.speakerCenterX
+                        let cy = beat?.y ?? config.speakerCenterY
+                        let fw = beat?.faceWidth ?? config.speakerFaceWidth
+                        let t = FaceCropCalculator.exportTransform(
+                            sourceSize: sourceDimensions,
+                            targetSize: config.outputSize,
+                            center: CGPoint(x: cx, y: cy),
+                            faceWidth: fw,
+                            mode: config.framingMode
+                        )
+                        scheduled.append(ScheduledItem(
+                            time: compCursor,
+                            transform: rawTransform.concatenating(t),
+                            center: CGPoint(x: cx, y: cy),
+                            isBeatBoundary: true
+                        ))
+                    }
                     compCursor = CMTimeAdd(compCursor, CMTime(seconds: segDuration, preferredTimescale: 600))
+                }
+
+                // Programar transforms: limitar transiciones Whip Slide a cambios reales de toma o saltos narrativos espaciados
+                // Slide to right: video saliente se desliza hacia la derecha (+X), entrante entra desde la izquierda (-X)
+                let slidePush = config.outputSize.width * 0.12 // Sutil y estilizado (12% del ancho)
+                let pushRight = CGAffineTransform(translationX: slidePush, y: 0)
+                let pushLeft = CGAffineTransform(translationX: -slidePush, y: 0)
+                let rampSec: Double = 0.04 // 40ms antes y 40ms después (80ms total, rápido y punchy)
+
+                var lastTransitionTime: Double = -10.0 // Cooldown de transiciones
+
+                for i in 0 ..< scheduled.count {
+                    let item = scheduled[i]
+                    if i == 0 || item.time.seconds < 0.1 {
+                        layerInstruction.setTransform(item.transform, at: item.time)
+                    } else {
+                        let prev = scheduled[i - 1]
+                        let cutTime = item.time
+                        let centerDiff = hypot(item.center.x - prev.center.x, item.center.y - prev.center.y)
+                        let timeSinceLast = cutTime.seconds - lastTransitionTime
+
+                        // Condición de transición:
+                        // 1. Cambio real de toma/encuadre (ej: webcam a cara completa o viceversa, centerDiff >= 0.16)
+                        // 2. O salto de beat con cooldown >= 4.0s y ligero cambio visual (centerDiff >= 0.06)
+                        let isShotChange = centerDiff >= 0.16
+                        let isSpacedBeat = item.isBeatBoundary && centerDiff >= 0.06 && timeSinceLast >= 4.0
+                        let shouldTransition = (isShotChange || isSpacedBeat) && timeSinceLast >= 2.0
+
+                        if shouldTransition {
+                            let rampDur = CMTime(seconds: rampSec, preferredTimescale: 600)
+                            let rampStart = CMTimeSubtract(cutTime, rampDur)
+
+                            // 1. Fase de salida (pre-corte): la toma anterior se desliza rápidamente hacia la derecha
+                            if rampStart > prev.time {
+                                layerInstruction.setTransformRamp(
+                                    fromStart: prev.transform,
+                                    toEnd: prev.transform.concatenating(pushRight),
+                                    timeRange: CMTimeRange(start: rampStart, duration: rampDur)
+                                )
+                            }
+
+                            // 2. Fase de entrada (post-corte): la nueva toma entra desde la izquierda (-push) y se asienta
+                            layerInstruction.setTransformRamp(
+                                fromStart: item.transform.concatenating(pushLeft),
+                                toEnd: item.transform,
+                                timeRange: CMTimeRange(start: cutTime, duration: rampDur)
+                            )
+
+                            // 3. Fijar el transform firme una vez terminada la rampa
+                            let settleTime = CMTimeAdd(cutTime, rampDur)
+                            layerInstruction.setTransform(item.transform, at: settleTime)
+                            lastTransitionTime = cutTime.seconds
+                        } else {
+                            // Corte directo limpio: sin animación en micro-cortes para evitar mareos
+                            layerInstruction.setTransform(item.transform, at: cutTime)
+                        }
+                    }
                 }
             } else {
                 let cropTransform = FaceCropCalculator.exportTransform(
@@ -266,7 +366,7 @@ public final class VideoRenderEngine {
                     faceWidth: config.speakerFaceWidth,
                     mode: config.framingMode
                 )
-                layerInstruction.setTransform(cropTransform, at: .zero)
+                layerInstruction.setTransform(rawTransform.concatenating(cropTransform), at: .zero)
             }
             instruction.layerInstructions = [layerInstruction]
         }

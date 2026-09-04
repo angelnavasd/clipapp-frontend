@@ -46,6 +46,8 @@ public struct TranscriptPayload: Codable {
     public var silenceGaps: [SilenceGap]?
     public var targetDuration: String?
     public var genre: String?
+    public var targetClipCount: Int?
+    public var sceneCuts: [Double]?
 
     public init(
         videoId: String,
@@ -54,7 +56,9 @@ public struct TranscriptPayload: Codable {
         words: [WordTimestamp],
         silenceGaps: [SilenceGap]? = nil,
         targetDuration: String? = nil,
-        genre: String? = nil
+        genre: String? = nil,
+        targetClipCount: Int? = 4,
+        sceneCuts: [Double]? = nil
     ) {
         self.videoId = videoId
         self.language = language
@@ -63,6 +67,8 @@ public struct TranscriptPayload: Codable {
         self.silenceGaps = silenceGaps
         self.targetDuration = targetDuration
         self.genre = genre
+        self.targetClipCount = targetClipCount
+        self.sceneCuts = sceneCuts
     }
 }
 

@@ -15,7 +15,11 @@ public enum FaceCropCalculator {
     /// cara 0.30 -> 1.0 (intacto), cara 0.10 (PiP) -> 0.62 (primer plano seguro).
     public static func windowHeightFraction(faceWidth: CGFloat?) -> CGFloat {
         guard let w = faceWidth, w > 0 else { return 1.0 }
-        return min(max(w * 3.4, 0.62), 1.0)
+        // Si el rostro ocupa >= 18% del ancho, aspect-fill estándar (1.78x) ya lo encuadra perfecto;
+        // no sobre-zoomear para no cortar frente ni barbilla.
+        // Si es una webcam chica en screen-share (w < 0.18), zoom suave (hasta ~1.35x, suelo 0.74) para destacar la ventanita.
+        if w >= 0.18 { return 1.0 }
+        return min(max(w * 4.2, 0.74), 1.0)
     }
 
     /// Transform de export aspect-fill centrado en `center` (normalizado, origen arriba-izquierda).
@@ -33,18 +37,22 @@ public enum FaceCropCalculator {
         let center = CGPoint(x: cx, y: cy)
         switch mode {
         case .autoFaceTrack, .manualCrop:
-            // Ventana adaptativa a la cara (sin cara = frame completo = aspect-fill clásico)
+            // Step 1: aspect-fill base (always covers the target, zero black)
+            let baseScale = max(targetSize.width / sourceSize.width,
+                                targetSize.height / sourceSize.height)
+            // Step 2: gentle face zoom on top (1.0 when no face, up to ~1.18×)
             let winFrac = mode == .autoFaceTrack ? windowHeightFraction(faceWidth: faceWidth) : 1.0
-            let scale = targetSize.height / (sourceSize.height * winFrac)
+            let faceZoom = 1.0 / winFrac   // e.g. 1/0.85 ≈ 1.18
+            let scale = baseScale * faceZoom
             let scaledW = sourceSize.width * scale
             let scaledH = sourceSize.height * scale
             let focusX = scaledW * clamp(center.x, 0, 1)
             let focusY = scaledH * clamp(center.y, 0, 1)
             var offsetX = (targetSize.width / 2.0) - focusX
             var offsetY = (targetSize.height / 2.0) - focusY
-            // Clamp: el contenido escalado siempre debe cubrir el target
-            offsetX = min(max(offsetX, targetSize.width - scaledW), max(0, targetSize.width - scaledW))
-            offsetY = min(max(offsetY, targetSize.height - scaledH), max(0, targetSize.height - scaledH))
+            // Clamp: scaled content always covers the target (offsets are ≤ 0)
+            offsetX = min(0, max(targetSize.width - scaledW, offsetX))
+            offsetY = min(0, max(targetSize.height - scaledH, offsetY))
             var t = CGAffineTransform.identity
             t = t.scaledBy(x: scale, y: scale)
             t = t.translatedBy(x: offsetX / scale, y: offsetY / scale)
@@ -59,8 +67,8 @@ public enum FaceCropCalculator {
             let focusY = scaledH * clamp(center.y, 0, 1)
             var offsetX = (targetSize.width / 2.0) - focusX
             var offsetY = (targetSize.height / 2.0) - focusY
-            offsetX = min(max(offsetX, targetSize.width - scaledW), max(0, targetSize.width - scaledW))
-            offsetY = min(max(offsetY, targetSize.height - scaledH), max(0, targetSize.height - scaledH))
+            offsetX = min(0, max(targetSize.width - scaledW, offsetX))
+            offsetY = min(0, max(targetSize.height - scaledH, offsetY))
             var t = CGAffineTransform.identity
             t = t.scaledBy(x: scale, y: scale)
             t = t.translatedBy(x: offsetX / scale, y: offsetY / scale)
@@ -93,16 +101,20 @@ public enum FaceCropCalculator {
             return (containerSize, .zero)
         }
         let safe = CGPoint(x: sanitized(center.x), y: sanitized(center.y))
+        // Same formula as exportTransform: aspect-fill base + gentle face zoom
+        let baseScale = max(containerSize.width / sourceSize.width,
+                            containerSize.height / sourceSize.height)
         let winFrac = windowHeightFraction(faceWidth: faceWidth)
-        let scale = containerSize.height / (sourceSize.height * winFrac)
-        let videoW = sourceSize.width * scale
-        let videoH = sourceSize.height * scale
+        let faceZoom = 1.0 / winFrac
+        let scale = baseScale * faceZoom
+        let videoW = max(containerSize.width, ceil(sourceSize.width * scale) + 2.0)
+        let videoH = max(containerSize.height, ceil(sourceSize.height * scale) + 2.0)
         let focusX = videoW * clamp(safe.x, 0, 1)
         let focusY = videoH * clamp(safe.y, 0, 1)
         var offsetX = (containerSize.width / 2.0) - focusX
         var offsetY = (containerSize.height / 2.0) - focusY
-        offsetX = min(max(offsetX, containerSize.width - videoW), max(0, containerSize.width - videoW))
-        offsetY = min(max(offsetY, containerSize.height - videoH), max(0, containerSize.height - videoH))
+        offsetX = min(0, max(containerSize.width - videoW, offsetX))
+        offsetY = min(0, max(containerSize.height - videoH, offsetY))
         return (CGSize(width: videoW, height: videoH), CGSize(width: offsetX, height: offsetY))
     }
 
@@ -142,5 +154,17 @@ public enum FaceCropCalculator {
     /// NaN/inf (p.ej. centros sin resolver) -> 0.5 neutro.
     static func sanitized(_ v: CGFloat) -> CGFloat {
         v.isFinite ? min(max(v, 0), 1) : 0.5
+    }
+
+    /// Tamaño REAL de display: el iPhone graba en píxeles portrait + flag de
+    /// rotación 90°/270° para landscape. Sin trasponer, todo el crop corre
+    /// con w/h invertidos (preview medio negro, export mal encuadrado).
+    public static func orientedSize(naturalSize: CGSize, preferredTransform: CGAffineTransform) -> CGSize {
+        let angle = atan2(Double(preferredTransform.b), Double(preferredTransform.a)) * 180.0 / .pi
+        let deg = abs(angle)
+        if abs(deg - 90) < 1 || abs(deg - 270) < 1 {
+            return CGSize(width: naturalSize.height, height: naturalSize.width)
+        }
+        return naturalSize
     }
 }

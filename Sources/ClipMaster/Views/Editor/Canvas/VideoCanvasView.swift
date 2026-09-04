@@ -177,10 +177,12 @@ public struct VideoCanvasView: View {
             var effectiveDuration = max(1.0, clip.netDuration)
             var isComposition = false
 
-            // F4: conocer el tamaño natural para preview idéntico al export
+            // F4: conocer el tamaño natural para preview idéntico al export (corregido por rotación)
             if let track = try? await AVURLAsset(url: url).loadTracks(withMediaType: .video).first,
                let naturalSize = try? await track.load(.naturalSize) {
-                await MainActor.run { self.sourceSize = naturalSize }
+                let tx = (try? await track.load(.preferredTransform)) ?? .identity
+                let oriented = FaceCropCalculator.orientedSize(naturalSize: naturalSize, preferredTransform: tx)
+                await MainActor.run { self.sourceSize = oriented }
             }
 
             do {

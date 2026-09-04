@@ -35,8 +35,9 @@ public struct SmartFramedPlayerView: View {
             let containerWidth = geo.size.width
             let containerHeight = geo.size.height
 
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 Color.black
+                    .frame(width: containerWidth, height: containerHeight)
 
                 switch mode {
                 case .autoFaceTrack:
@@ -52,6 +53,7 @@ public struct SmartFramedPlayerView: View {
                     autoFaceTrackLayer(containerWidth: containerWidth, containerHeight: containerHeight, customCenterX: speakerCenterX)
                 }
             }
+            .frame(width: containerWidth, height: containerHeight, alignment: .topLeading)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
     }
@@ -70,11 +72,14 @@ public struct SmartFramedPlayerView: View {
                 center: center,
                 faceWidth: speakerFaceWidth
             )
-            RawPlayerView(player: player, videoGravity: .resizeAspect)
-                .frame(width: layout.size.width, height: layout.size.height)
-                .offset(x: layout.offset.width, y: layout.offset.height)
-                .frame(width: containerWidth, height: containerHeight)
-                .clipped()
+            ZStack(alignment: .topLeading) {
+                RawPlayerView(player: player, videoGravity: .resizeAspectFill)
+                    .frame(width: layout.size.width, height: layout.size.height)
+                    .offset(x: layout.offset.width, y: layout.offset.height)
+                    .animation(.easeInOut(duration: 0.12), value: layout.offset.width)
+            }
+            .frame(width: containerWidth, height: containerHeight, alignment: .topLeading)
+            .clipped()
         } else {
             // Legacy: asumir 16:9 (sin sourceSize conocido)
             let videoHeight = containerHeight

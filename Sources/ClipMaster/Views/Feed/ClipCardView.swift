@@ -303,12 +303,14 @@ public struct ClipCardView: View {
                 center: CGPoint(x: c.x, y: c.y),
                 faceWidth: c.faceWidth
             )
-            Image(cg, scale: 1.0, label: Text(""))
-                .resizable()
-                .frame(width: layout.size.width, height: layout.size.height)
-                .offset(x: layout.offset.width, y: layout.offset.height)
-                .frame(width: geo.size.width, height: geo.size.height)
-                .clipped()
+            ZStack(alignment: .topLeading) {
+                Image(cg, scale: 1.0, label: Text(""))
+                    .resizable()
+                    .frame(width: layout.size.width, height: layout.size.height)
+                    .offset(x: layout.offset.width, y: layout.offset.height)
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .clipped()
         }
         .clipShape(RoundedRectangle(cornerRadius: 22))
     }
@@ -339,10 +341,12 @@ public struct ClipCardView: View {
 
             // Solo la card activa crea AVPlayer: nada de players pausados en negro al fondo
             guard isActive else { return }
-            // Tamaño natural para preview idéntico al export
+            // Tamaño natural para preview idéntico al export (corregido por rotación)
             if let track = try? await AVURLAsset(url: url).loadTracks(withMediaType: .video).first,
                let naturalSize = try? await track.load(.naturalSize) {
-                await MainActor.run { self.sourceSize = naturalSize }
+                let tx = (try? await track.load(.preferredTransform)) ?? .identity
+                let oriented = FaceCropCalculator.orientedSize(naturalSize: naturalSize, preferredTransform: tx)
+                await MainActor.run { self.sourceSize = oriented }
             }
 
             var playerItem: AVPlayerItem? = nil
@@ -392,8 +396,8 @@ public struct ClipCardView: View {
                     self.isPlaying = false
                 }
 
-                // Observador de tiempo para scrubber
-                let interval = CMTime(value: 1, timescale: 10)
+                // Observador de tiempo para scrubber y seguimiento de encuadre a 30 fps
+                let interval = CMTime(value: 1, timescale: 30)
                 self.timeObserverToken = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak p] time in
                     guard let _ = p else { return }
                     self.currentTime = time.seconds

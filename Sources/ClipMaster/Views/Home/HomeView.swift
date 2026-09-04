@@ -4,8 +4,6 @@ import PhotosUI
 public struct HomeView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var selectedPickerItems: [PhotosPickerItem] = []
-    @State private var showProfileSheet: Bool = false
-    @State private var youTubeURL: String = ""
 
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -34,9 +32,6 @@ public struct HomeView: View {
                     .padding(.bottom, 30)
                 }
             }
-        }
-        .sheet(isPresented: $showProfileSheet) {
-            ProfileView(viewModel: viewModel)
         }
     }
 
@@ -77,27 +72,6 @@ public struct HomeView: View {
                 .background(Color.yellow.opacity(0.15))
                 .clipShape(Capsule())
 
-                // Botón de Perfil
-                Button(action: {
-                    showProfileSheet = true
-                    viewModel.triggerHapticFeedback(type: .light)
-                }) {
-                    ZStack {
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.yellow, .orange],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 32, height: 32)
-
-                        Text("AN")
-                            .font(.system(size: 12, weight: .black, design: .rounded))
-                            .foregroundColor(.black)
-                    }
-                }
             }
         }
         .padding(.horizontal, 20)
@@ -205,8 +179,6 @@ public struct HomeView: View {
                 }
             }
 
-            // Opción 2: Pegar Enlace de YouTube
-            youTubeInputSection()
         }
         .padding(24)
         .background(
@@ -218,100 +190,6 @@ public struct HomeView: View {
                 )
         )
         .padding(.horizontal, 20)
-    }
-
-    // MARK: - Sección de Enlace de YouTube
-    @ViewBuilder
-    private func youTubeInputSection() -> some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Rectangle()
-                    .fill(Color.white.opacity(0.12))
-                    .frame(height: 1)
-                Text("O PEGA UN ENLACE DE YOUTUBE")
-                    .font(.system(size: 10, weight: .black))
-                    .foregroundColor(.gray)
-                    .tracking(1)
-                Rectangle()
-                    .fill(Color.white.opacity(0.12))
-                    .frame(height: 1)
-            }
-            .padding(.vertical, 4)
-
-            HStack(spacing: 10) {
-                Image(systemName: "play.rectangle.fill")
-                    .foregroundColor(.red)
-                    .font(.system(size: 20))
-
-                TextField("https://youtube.com/watch?v=...", text: $youTubeURL)
-                    .font(.system(size: 13))
-                    .foregroundColor(.white)
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled(true)
-                    #endif
-
-                if !youTubeURL.isEmpty {
-                    Button(action: { youTubeURL = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.gray)
-                            .font(.system(size: 16))
-                    }
-                } else {
-                    Button(action: {
-                        #if os(iOS)
-                        if let clip = UIPasteboard.general.string {
-                            youTubeURL = clip
-                            viewModel.triggerHapticFeedback(type: .light)
-                        }
-                        #endif
-                    }) {
-                        Text("Pegar")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.9))
-                            .clipShape(Capsule())
-                    }
-                }
-            }
-            .padding(12)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
-
-            if !youTubeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button(action: {
-                    Task {
-                        await viewModel.processYouTubeURL(urlString: youTubeURL)
-                    }
-                }) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("Analizar Video con Gemini")
-                            .font(.system(size: 14, weight: .bold))
-                    }
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        LinearGradient(
-                            colors: [Color.red, Color(red: 0.85, green: 0.1, blue: 0.2)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .shadow(color: Color.red.opacity(0.35), radius: 8, y: 3)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
     }
 
     // MARK: - Ajustes Rápidos
