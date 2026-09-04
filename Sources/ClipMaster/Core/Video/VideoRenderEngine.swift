@@ -242,13 +242,7 @@ public final class VideoRenderEngine {
             // F5: un transform por segmento de composición cuando hay centros por beat
             if config.framingMode == .autoFaceTrack, let perBeat = config.perBeatCenters, !perBeat.isEmpty {
                 var compCursor = CMTime.zero
-                struct ScheduledItem {
-                    let time: CMTime
-                    let transform: CGAffineTransform
-                    let center: CGPoint
-                    let isBeatBoundary: Bool
-                }
-                var scheduled: [ScheduledItem] = []
+                var scheduled: [(time: CMTime, transform: CGAffineTransform)] = []
                 for segment in clampedSegments {
                     let segDuration = segment.end - segment.start
                     guard segDuration > 0.05 else { continue }
@@ -257,7 +251,6 @@ public final class VideoRenderEngine {
                         .sorted(by: { $0.start < $1.start })
 
                     if matching.count > 1 {
-                        var isFirstSub = true
                         for sub in matching {
                             let subStart = max(segment.start, sub.start)
                             let subEnd = min(segment.end, sub.end)
@@ -271,13 +264,7 @@ public final class VideoRenderEngine {
                                 faceWidth: sub.faceWidth,
                                 mode: config.framingMode
                             )
-                            scheduled.append(ScheduledItem(
-                                time: transformTime,
-                                transform: rawTransform.concatenating(t),
-                                center: CGPoint(x: sub.x, y: sub.y),
-                                isBeatBoundary: isFirstSub
-                            ))
-                            isFirstSub = false
+                            scheduled.append((time: transformTime, transform: rawTransform.concatenating(t)))
                         }
                     } else {
                         let mid = (segment.start + segment.end) / 2.0
@@ -292,71 +279,14 @@ public final class VideoRenderEngine {
                             faceWidth: fw,
                             mode: config.framingMode
                         )
-                        scheduled.append(ScheduledItem(
-                            time: compCursor,
-                            transform: rawTransform.concatenating(t),
-                            center: CGPoint(x: cx, y: cy),
-                            isBeatBoundary: true
-                        ))
+                        scheduled.append((time: compCursor, transform: rawTransform.concatenating(t)))
                     }
                     compCursor = CMTimeAdd(compCursor, CMTime(seconds: segDuration, preferredTimescale: 600))
                 }
 
-                // Programar transforms: limitar transiciones Whip Slide a cambios reales de toma o saltos narrativos espaciados
-                // Slide to right: video saliente se desliza hacia la derecha (+X), entrante entra desde la izquierda (-X)
-                let slidePush = config.outputSize.width * 0.12 // Sutil y estilizado (12% del ancho)
-                let pushRight = CGAffineTransform(translationX: slidePush, y: 0)
-                let pushLeft = CGAffineTransform(translationX: -slidePush, y: 0)
-                let rampSec: Double = 0.04 // 40ms antes y 40ms después (80ms total, rápido y punchy)
-
-                var lastTransitionTime: Double = -10.0 // Cooldown de transiciones
-
-                for i in 0 ..< scheduled.count {
-                    let item = scheduled[i]
-                    if i == 0 || item.time.seconds < 0.1 {
-                        layerInstruction.setTransform(item.transform, at: item.time)
-                    } else {
-                        let prev = scheduled[i - 1]
-                        let cutTime = item.time
-                        let centerDiff = hypot(item.center.x - prev.center.x, item.center.y - prev.center.y)
-                        let timeSinceLast = cutTime.seconds - lastTransitionTime
-
-                        // Condición de transición:
-                        // 1. Cambio real de toma/encuadre (ej: webcam a cara completa o viceversa, centerDiff >= 0.16)
-                        // 2. O salto de beat con cooldown >= 4.0s y ligero cambio visual (centerDiff >= 0.06)
-                        let isShotChange = centerDiff >= 0.16
-                        let isSpacedBeat = item.isBeatBoundary && centerDiff >= 0.06 && timeSinceLast >= 4.0
-                        let shouldTransition = (isShotChange || isSpacedBeat) && timeSinceLast >= 2.0
-
-                        if shouldTransition {
-                            let rampDur = CMTime(seconds: rampSec, preferredTimescale: 600)
-                            let rampStart = CMTimeSubtract(cutTime, rampDur)
-
-                            // 1. Fase de salida (pre-corte): la toma anterior se desliza rápidamente hacia la derecha
-                            if rampStart > prev.time {
-                                layerInstruction.setTransformRamp(
-                                    fromStart: prev.transform,
-                                    toEnd: prev.transform.concatenating(pushRight),
-                                    timeRange: CMTimeRange(start: rampStart, duration: rampDur)
-                                )
-                            }
-
-                            // 2. Fase de entrada (post-corte): la nueva toma entra desde la izquierda (-push) y se asienta
-                            layerInstruction.setTransformRamp(
-                                fromStart: item.transform.concatenating(pushLeft),
-                                toEnd: item.transform,
-                                timeRange: CMTimeRange(start: cutTime, duration: rampDur)
-                            )
-
-                            // 3. Fijar el transform firme una vez terminada la rampa
-                            let settleTime = CMTimeAdd(cutTime, rampDur)
-                            layerInstruction.setTransform(item.transform, at: settleTime)
-                            lastTransitionTime = cutTime.seconds
-                        } else {
-                            // Corte directo limpio: sin animación en micro-cortes para evitar mareos
-                            layerInstruction.setTransform(item.transform, at: cutTime)
-                        }
-                    }
+                // Programar transforms con CORTE DIRECTO LIMPIO (sin efectos de slide ni lag)
+                for item in scheduled {
+                    layerInstruction.setTransform(item.transform, at: item.time)
                 }
             } else {
                 let cropTransform = FaceCropCalculator.exportTransform(

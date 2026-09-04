@@ -201,13 +201,14 @@ public struct VideoCanvasView: View {
             let p: AVPlayer
             if let item = playerItem {
                 p = AVPlayer(playerItem: item)
+                await p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
             } else {
                 print("⚠️ [Editor] Usando reproductor directo de video original")
                 let asset = AVURLAsset(url: url)
                 let item = AVPlayerItem(asset: asset)
                 p = AVPlayer(playerItem: item)
                 let startTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
-                await p.seek(to: startTime)
+                await p.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
             }
 
             p.actionAtItemEnd = .none
@@ -215,6 +216,7 @@ public struct VideoCanvasView: View {
             p.isMuted = false
 
             await MainActor.run {
+                self.currentPlaybackTime = 0.0
                 self.totalDuration = effectiveDuration
                 self.player = p
                 p.play()
@@ -232,11 +234,12 @@ public struct VideoCanvasView: View {
                     queue: .main
                 ) { _ in
                     if isComposition {
-                        p.seek(to: .zero)
+                        p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
                     } else {
                         let startTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
-                        p.seek(to: startTime)
+                        p.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
                     }
+                    self.currentPlaybackTime = 0.0
                     p.play()
                 }
 

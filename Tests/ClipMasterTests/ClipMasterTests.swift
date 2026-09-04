@@ -440,6 +440,41 @@ final class ClipMasterTests: XCTestCase {
         XCTAssertNil(AppViewModel.beatIndex(of: "xx"))
     }
 
+    func testNormalizeSceneAnchorsLocksTalkingHead() {
+        let raw = [
+            BeatCenter(start: 0, end: 3, x: 0.48, y: 0.43, faceWidth: 0.22),
+            BeatCenter(start: 3, end: 6, x: 0.52, y: 0.45, faceWidth: 0.20),
+            BeatCenter(start: 6, end: 9, x: 0.50, y: 0.44, faceWidth: 0.24),
+        ]
+        let stabilized = AppViewModel.normalizeSceneAnchors(raw)
+        XCTAssertEqual(stabilized.count, 3)
+        // Todos deben tener la mediana fija (x: 0.50, y: 0.44, w: 0.22)
+        for bc in stabilized {
+            XCTAssertEqual(bc.x, 0.50, accuracy: 0.001)
+            XCTAssertEqual(bc.y, 0.44, accuracy: 0.001)
+            XCTAssertEqual(bc.faceWidth!, 0.22, accuracy: 0.001)
+        }
+    }
+
+    func testNormalizeSceneAnchorsPreservesRealSceneCut() {
+        let raw = [
+            // Escena 1: webcam en esquina
+            BeatCenter(start: 0, end: 3, x: 0.85, y: 0.80, faceWidth: 0.12),
+            BeatCenter(start: 3, end: 6, x: 0.83, y: 0.82, faceWidth: 0.14),
+            // Escena 2: corte a talking head centrado
+            BeatCenter(start: 6, end: 9, x: 0.50, y: 0.45, faceWidth: 0.25),
+            BeatCenter(start: 9, end: 12, x: 0.48, y: 0.43, faceWidth: 0.23),
+        ]
+        let stabilized = AppViewModel.normalizeSceneAnchors(raw)
+        XCTAssertEqual(stabilized.count, 4)
+        // Escena 1 estabilizada
+        XCTAssertEqual(stabilized[0].x, 0.85, accuracy: 0.02)
+        XCTAssertEqual(stabilized[1].x, 0.85, accuracy: 0.02)
+        // Escena 2 estabilizada
+        XCTAssertEqual(stabilized[2].x, 0.50, accuracy: 0.02)
+        XCTAssertEqual(stabilized[3].x, 0.50, accuracy: 0.02)
+    }
+
     // MARK: - orientedSize (rotación iPhone)
 
     func testOrientedSizeTraspone90() {

@@ -6,6 +6,7 @@ public struct ClipEditorView: View {
     @State private var currentPlaybackTime: Double = 0.0
     @State private var totalDuration: Double = 0.0
     @State private var seekActionTime: Double? = nil
+    @State private var wasPlayingBeforeScrub: Bool = false
     @State private var showExportSheet: Bool = false
     @State private var showTranscriptDrawer: Bool = false
     @State private var activePanel: EditorSubPanel? = nil
@@ -162,9 +163,29 @@ public struct ClipEditorView: View {
             Slider(
                 value: Binding(
                     get: { currentPlaybackTime },
-                    set: { seekActionTime = $0 }
+                    set: {
+                        currentPlaybackTime = $0
+                        seekActionTime = $0
+                    }
                 ),
-                in: 0...max(1.0, totalDuration)
+                in: 0...max(1.0, totalDuration),
+                onEditingChanged: { editing in
+                    if editing {
+                        wasPlayingBeforeScrub = isPlaying
+                        isPlaying = false
+                    } else {
+                        if currentPlaybackTime <= 0.3 {
+                            currentPlaybackTime = 0.0
+                            seekActionTime = 0.0
+                            isPlaying = false
+                        } else {
+                            seekActionTime = currentPlaybackTime
+                            if wasPlayingBeforeScrub {
+                                isPlaying = true
+                            }
+                        }
+                    }
+                }
             )
             .tint(.orange)
 

@@ -445,14 +445,72 @@ public final class AppViewModel: ObservableObject {
         if centers.isEmpty {
             centers.append(BeatCenter(start: clip.timeRange.start, end: clip.timeRange.end, x: 0.5, y: 0.45, faceWidth: 0.25))
         }
+
+        // F5-pro: Normalización y Estabilización por Escena (Locked Anchor)
+        // Agrupa tramos continuos de la misma escena y fija la mediana de posición y zoom.
+        let normalizedCenters = Self.normalizeSceneAnchors(centers)
         let mode: FramingMode = .autoFaceTrack
-        let mid = centers[centers.count / 2]
+        let mid = normalizedCenters[normalizedCenters.count / 2]
         let center: (x: CGFloat, y: CGFloat) = (mid.x, mid.y)
-        let framing = ClipFraming(mode: mode, centerX: center.x, centerY: center.y, faceWidth: mid.faceWidth, beatCenters: centers)
+        let framing = ClipFraming(mode: mode, centerX: center.x, centerY: center.y, faceWidth: mid.faceWidth, beatCenters: normalizedCenters)
         self.clipFramings[clip.id] = framing
         if updateGlobals { self.applyFraming(framing) }
-        print("🎯 [Framing:Vision] clip=\(clip.id) modo=\(mode.rawValue) beats=\(centers.count)")
+        print("🎯 [Framing:Vision] clip=\(clip.id) modo=\(mode.rawValue) beats=\(normalizedCenters.count)")
         return framing
+    }
+
+    /// Normaliza los centros de encuadre por escena (Locked Anchor):
+    /// Si múltiples tramos consecutivos corresponden a la misma toma del orador
+    /// (distancia euclidiana < 0.18), se fija un anclaje único usando la mediana
+    /// de posición (X, Y) y zoom (faceWidth).
+    /// Esto elimina el bamboleo y saltos de zoom aleatorios entre cortes de la misma escena.
+    nonisolated public static func normalizeSceneAnchors(_ centers: [BeatCenter]) -> [BeatCenter] {
+        guard centers.count > 1 else { return centers }
+
+        // 1. Agrupar tramos en clusters continuos de la misma escena
+        var clusters: [[BeatCenter]] = []
+        var currentCluster: [BeatCenter] = [centers[0]]
+
+        for i in 1 ..< centers.count {
+            let prev = currentCluster.last!
+            let curr = centers[i]
+            let dist = hypot(curr.x - prev.x, curr.y - prev.y)
+
+            // Si el salto de posición es grande (>= 0.18, ej. webcam a plano completo), es otra escena
+            if dist >= 0.18 {
+                clusters.append(currentCluster)
+                currentCluster = [curr]
+            } else {
+                currentCluster.append(curr)
+            }
+        }
+        if !currentCluster.isEmpty {
+            clusters.append(currentCluster)
+        }
+
+        // 2. Para cada cluster (escena continua), calcular el anclaje mediano estable
+        var stabilized: [BeatCenter] = []
+        for cluster in clusters {
+            let sortedX = cluster.map(\.x).sorted()
+            let sortedY = cluster.map(\.y).sorted()
+            let medianX = sortedX[sortedX.count / 2]
+            let medianY = sortedY[sortedY.count / 2]
+
+            // Mediana de faceWidth (zoom bloqueado)
+            let widths = cluster.compactMap(\.faceWidth).sorted()
+            let medianW: CGFloat? = widths.isEmpty ? nil : widths[widths.count / 2]
+
+            for item in cluster {
+                stabilized.append(BeatCenter(
+                    start: item.start,
+                    end: item.end,
+                    x: medianX,
+                    y: medianY,
+                    faceWidth: medianW
+                ))
+            }
+        }
+        return stabilized
     }
 
     /// Parsea el índice de beat del id "b{i}t0".

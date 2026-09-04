@@ -14,6 +14,8 @@ public struct ClipCardView: View {
     @State private var isMuted: Bool = false
     @State private var currentTime: Double = 0.0
     @State private var totalDuration: Double = 0.0
+    @State private var isScrubbing: Bool = false
+    @State private var wasPlayingBeforeScrub: Bool = false
     @State private var timeObserverToken: Any? = nil
     @State private var endObserver: NSObjectProtocol? = nil
     @State private var failureObserver: NSObjectProtocol? = nil
@@ -131,9 +133,16 @@ public struct ClipCardView: View {
                         Slider(
                             value: Binding(
                                 get: { currentTime },
-                                set: { seek(to: $0) }
+                                set: { onScrubDrag(to: $0) }
                             ),
-                            in: 0...max(1.0, totalDuration)
+                            in: 0...max(1.0, totalDuration),
+                            onEditingChanged: { editing in
+                                if editing {
+                                    onScrubStart()
+                                } else {
+                                    onScrubEnd()
+                                }
+                            }
                         )
                         .accentColor(.orange)
 
@@ -317,9 +326,9 @@ public struct ClipCardView: View {
 
     private func posterTime() -> Double {
         if let beats = clip.storyBeats, let first = beats.first {
-            return (first.start + first.end) / 2.0
+            return max(0, first.start + 0.05)
         }
-        return (clip.timeRange.start + clip.timeRange.end) / 2.0
+        return max(0, clip.timeRange.start + 0.05)
     }
 
     private func setupPlayer() {
@@ -372,13 +381,14 @@ public struct ClipCardView: View {
             let p: AVPlayer
             if let item = playerItem {
                 p = AVPlayer(playerItem: item)
+                await p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
             } else {
                 print("⚠️ [ClipCard] Usando reproductor directo de video original para rango \(clip.timeRange.start) - \(clip.timeRange.end)")
                 let asset = AVURLAsset(url: url)
                 let item = AVPlayerItem(asset: asset)
                 p = AVPlayer(playerItem: item)
                 let startTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
-                await p.seek(to: startTime)
+                await p.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
             }
 
             p.actionAtItemEnd = .none
@@ -386,6 +396,7 @@ public struct ClipCardView: View {
             p.isMuted = isMuted
 
             await MainActor.run {
+                self.currentTime = 0.0
                 self.totalDuration = effectiveDuration
                 self.player = p
                 if self.isActive {
@@ -400,7 +411,10 @@ public struct ClipCardView: View {
                 let interval = CMTime(value: 1, timescale: 30)
                 self.timeObserverToken = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak p] time in
                     guard let _ = p else { return }
-                    self.currentTime = time.seconds
+                    // NO sobreescribir currentTime si el usuario está arrastrando el timeline con el dedo
+                    if !self.isScrubbing {
+                        self.currentTime = time.seconds
+                    }
                 }
 
                 self.endObserver = NotificationCenter.default.addObserver(
@@ -409,11 +423,12 @@ public struct ClipCardView: View {
                     queue: .main
                 ) { _ in
                     if isComposition {
-                        p.seek(to: .zero)
+                        p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
                     } else {
                         let startTime = CMTime(seconds: clip.timeRange.start, preferredTimescale: 600)
-                        p.seek(to: startTime)
+                        p.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
                     }
+                    self.currentTime = 0.0
                     if self.isActive { p.play() }
                 }
 
@@ -466,11 +481,73 @@ public struct ClipCardView: View {
         viewModel.triggerHapticFeedback(type: .light)
     }
 
+    private func onScrubStart() {
+        isScrubbing = true
+        wasPlayingBeforeScrub = isPlaying
+        // Pausar inmediatamente para silenciar el audio y evitar el tartamudeo "hohohohola"
+        player?.pause()
+        isPlaying = false
+    }
+
+    private func onScrubDrag(to seconds: Double) {
+        let clamped = max(0, min(totalDuration, seconds))
+        currentTime = (clamped <= 0.15) ? 0.0 : clamped
+        guard let player = player else { return }
+        // Durante el arrastre con el dedo, tolerancia moderada para respuesta fluida sin trabas
+        let cmTime = CMTime(seconds: currentTime, preferredTimescale: 600)
+        let tolerance = (currentTime == 0.0) ? .zero : CMTime(seconds: 0.12, preferredTimescale: 600)
+        player.seek(to: cmTime, toleranceBefore: tolerance, toleranceAfter: tolerance)
+    }
+
+    private func onScrubEnd() {
+        guard let player = player else {
+            isScrubbing = false
+            return
+        }
+
+        // Si se rebobinó hasta el principio (<= 0.3s), pausar limpiamente en 00:00 sin avanzar en falso
+        if currentTime <= 0.3 {
+            self.currentTime = 0.0
+            player.pause()
+            self.isPlaying = false
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak player] _ in
+                DispatchQueue.main.async {
+                    player?.pause()
+                    self.currentTime = 0.0
+                    self.isPlaying = false
+                    self.isScrubbing = false
+                }
+            }
+            return
+        }
+
+        let targetSeconds = currentTime
+        let cmTime = CMTime(seconds: targetSeconds, preferredTimescale: 600)
+        // Al soltar el dedo en un punto intermedio, fijar la posición exacta con tolerancia cero
+        player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak player] _ in
+            DispatchQueue.main.async {
+                self.isScrubbing = false
+                if self.wasPlayingBeforeScrub && self.isActive {
+                    player?.play()
+                    self.isPlaying = true
+                }
+            }
+        }
+    }
+
     private func seek(to seconds: Double) {
         guard let player = player else { return }
-        let cmTime = CMTime(seconds: seconds, preferredTimescale: 600)
+        let target = max(0, min(totalDuration, seconds))
+        self.currentTime = target
+        if target <= 0.05 {
+            self.currentTime = 0.0
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            player.pause()
+            self.isPlaying = false
+            return
+        }
+        let cmTime = CMTime(seconds: target, preferredTimescale: 600)
         player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        self.currentTime = seconds
     }
 
     private func formatTime(_ sec: Double) -> String {
